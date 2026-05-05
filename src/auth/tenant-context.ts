@@ -15,6 +15,8 @@
  * through this wrapper — those use per-channel auth (OAuth tokens etc).
  */
 
+import { assertAllowed } from './egress-allowlist.js';
+
 export interface PlatformFetchOptions extends RequestInit {
   /** Per-call override for X-Mission-Token. Falls back to MISSION_TOKEN env. */
   missionToken?: string;
@@ -57,6 +59,7 @@ export function readTenantContext(): TenantContext {
  * `fetch` for those endpoints. Channel adapters use their own auth.
  */
 export async function platformFetch(url: string, options: PlatformFetchOptions = {}): Promise<Response> {
+  assertAllowed(url);
   const { tenantId, userId, missionToken: envToken } = readTenantContext();
   const { missionToken: callToken, headers: callerHeaders, ...rest } = options;
 

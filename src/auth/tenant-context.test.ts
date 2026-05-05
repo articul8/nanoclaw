@@ -132,6 +132,16 @@ describe('platformFetch', () => {
     );
     expect(mock).not.toHaveBeenCalled();
   });
+
+  it('refuses to call denied LLM-provider URLs (egress allowlist)', async () => {
+    const mock = vi.fn().mockResolvedValue(new Response('ok'));
+    vi.stubGlobal('fetch', mock);
+
+    await expect(platformFetch('https://api.anthropic.com/v1/messages')).rejects.toThrow(
+      /direct call to api\.anthropic\.com is blocked/
+    );
+    expect(mock).not.toHaveBeenCalled();
+  });
 });
 
 describe('platformPostJson', () => {
