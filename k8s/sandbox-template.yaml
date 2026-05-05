@@ -1,6 +1,16 @@
 # a8-claw SandboxTemplate — Kubernetes Agent Sandbox
-# NanoClaw (TypeScript/OpenClaw) running inside gVisor-isolated pods.
-# Each chat session gets its own Sandbox with PVC for conversation persistence.
+#
+# nanoclaw (forked at articul8/nanoclaw, host process at /app/dist/index.js)
+# running inside gVisor-isolated pods. Each session gets its own ephemeral
+# container; durable state (episodes, semantic memory, graph entities,
+# audit ledger) lives in Warp — see the fork's CLAUDE.md "Storage
+# architecture" section. Tier-sized scratch is introduced in Phase 8
+# (claw-tiny / small / medium / large / xl).
+#
+# Inference NEVER bypasses Model Manager. No Anthropic API key in env;
+# the SDK is configured with ANTHROPIC_BASE_URL set per-session by the
+# host based on Model Manager's /resolve response. api.anthropic.com is
+# blocked at the NetworkPolicy layer (k8s/network-policy.yaml).
 ---
 apiVersion: extensions.agents.x-k8s.io/v1alpha1
 kind: SandboxTemplate
@@ -13,7 +23,6 @@ metadata:
 spec:
   template:
     spec:
-      # gVisor runtime — same isolation as a8-code
       runtimeClassName: gvisor
 
       nodeSelector:
@@ -31,25 +40,59 @@ spec:
               name: nanoclaw
 
           env:
-            # ── Secrets ─────────────────────────────────────────────
-            - name: ANTHROPIC_API_KEY
+            # ── Tenant context ─────────────────────────────────────
+            # Populated per-pod by the warm-pool allocator at scheduling
+            # time. The runtime injects them into every outbound HTTP call
+            # via src/auth/tenant-context.ts. Tenant-only scoping is a
+            # security breach — both must be set, both must be non-empty.
+            - name: TENANT_ID
+              value: ""    # MUST be overridden per-pod
+            - name: USER_ID
+              value: ""    # MUST be overridden per-pod
+
+            # ── Platform service URLs (from configmap) ─────────────
+            - name: WARP_URL
               valueFrom:
-                secretKeyRef:
-                  name: a8-claw-secrets
-                  key: anthropic-api-key
+                configMapKeyRef:
+                  name: a8-claw-config
+                  key: warp-url
+            - name: MODEL_MANAGER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: a8-claw-config
+                  key: model-manager-url
+            - name: TOOL_MANAGER_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: a8-claw-config
+                  key: tool-manager-url
+            - name: RABBITMQ_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: a8-claw-config
+                  key: rabbitmq-url
 
-            # ── Warp connection ─────────────────────────────────────
-            - name: WARP_BASE_URL
-              value: "http://aks-warp-service.aks-warp-apps.svc.cluster.local:8000"
+            # ── Default chat model (resolved at session spawn) ─────
+            # The model NAME comes from configmap; the runtime POSTs to
+            # Model Manager /resolve at session spawn to get an endpoint
+            # UUID, then sets ANTHROPIC_BASE_URL = MODEL_MANAGER_URL/run/{uuid}
+            # for the SDK. Hardcoded UUIDs are forbidden (they differ per
+            # env). See src/integration/model-manager-base-url.ts (Phase 4).
+            - name: DEFAULT_LLM_MODEL
+              valueFrom:
+                configMapKeyRef:
+                  name: a8-claw-config
+                  key: default-llm-model
 
-            # ── NanoClaw config ─────────────────────────────────────
+            # ── nanoclaw runtime config ────────────────────────────
             - name: NANOCLAW_PORT
               value: "3000"
             - name: NANOCLAW_SKILLS_DIR
               value: "/app/skills"
 
           resources:
-            # a8-claw is lighter than a8-code (chat, not heavy compute)
+            # v1 baseline — equivalent to claw-medium (Phase 8 introduces
+            # the full tier matrix tiny/small/medium/large/xl).
             requests:
               cpu: "250m"
               memory: "512Mi"
@@ -58,6 +101,9 @@ spec:
               memory: "2Gi"
 
           volumeMounts:
+            # Ephemeral scratch — nanoclaw's session SQLite DBs, file
+            # uploads, working files. Dies with the container. Durable
+            # platform state lives in Warp.
             - name: session-data
               mountPath: /workspace
             - name: config
@@ -91,9 +137,12 @@ spec:
                 - ALL
 
       volumes:
+        # Ephemeral. sizeLimit becomes per-tier in Phase 8 (5Gi here is
+        # the medium-tier baseline; emptyDir was previously a 5Gi EFS PVC
+        # which violated the storage-via-Warp principle — see fork CLAUDE.md).
         - name: session-data
-          persistentVolumeClaim:
-            claimName: ""
+          emptyDir:
+            sizeLimit: 5Gi
 
         - name: config
           configMap:
@@ -104,13 +153,3 @@ spec:
             name: a8-claw-skills
 
       terminationGracePeriodSeconds: 15
-
-  volumeClaimTemplates:
-    - metadata:
-        name: session-data
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        storageClassName: efs-sc
-        resources:
-          requests:
-            storage: 5Gi  # Smaller than a8-code — chat state, not heavy data
