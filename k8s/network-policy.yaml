@@ -1,10 +1,25 @@
-# a8-claw NetworkPolicy — Same base rules as a8-code, plus chat channel webhooks.
+# a8-claw NetworkPolicy
 #
-# a8-claw can reach everything a8-code can, plus:
-#   ✅ Telegram Bot API (api.telegram.org:443)
-#   ✅ Slack API (api.slack.com:443)
-#   ✅ Discord API (discord.com:443)
-# These are covered by the general HTTPS (port 443) egress rule.
+# Egress invariants per RUNTIME_CONTRACT_20260505.md §7:
+#   • Model Manager (cluster-internal) — REACHABLE; the only inference path
+#   • Tool Manager (cluster-internal) — REACHABLE; all platform tools (MCP)
+#   • Warp (cluster-internal) — REACHABLE; graph, memory, audit, metering
+#   • Channel adapter targets (Slack/Telegram/Discord/etc.) — REACHABLE per allowlist
+#   • api.anthropic.com / api.openai.com — BLOCKED (no API key in env, no
+#     direct path; the SDK is configured with ANTHROPIC_BASE_URL pointing
+#     at Model Manager so all inference goes through the gateway)
+#
+# Vanilla K8s NetworkPolicy can't enforce FQDN-level egress; it only
+# supports IP CIDRs and namespace/pod selectors. Anthropic / OpenAI
+# blocking is enforced via:
+#   1. No API key in container env (sandbox-template.yaml) — SDK can't auth
+#   2. Runtime egress-allowlist module (src/auth/egress-allowlist.ts) —
+#      defense-in-depth runtime check
+#   3. ANTHROPIC_BASE_URL = MODEL_MANAGER_URL in env — SDK doesn't even
+#      try to reach api.anthropic.com
+# v2 hardening (when cluster CNI is Cilium/Calico): add CiliumNetworkPolicy
+# / Calico GlobalNetworkPolicy with explicit FQDN block for the model
+# provider domains.
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -22,7 +37,7 @@ spec:
     - Egress
     - Ingress
   ingress:
-    # Health checks + NanoClaw web interface from within namespace
+    # Health checks + nanoclaw web interface from within namespace
     - from:
         - podSelector: {}
       ports:
@@ -42,15 +57,15 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # Warp API
+    # Warp API (port 8085 per contract; was 8000 — that was a stale value)
     - to:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: aks-warp-apps
       ports:
-        - port: 8000
+        - port: 8085
           protocol: TCP
-    # Model Manager
+    # Model Manager — the single inference gateway
     - to:
         - namespaceSelector:
             matchLabels:
@@ -58,7 +73,7 @@ spec:
       ports:
         - port: 8000
           protocol: TCP
-    # Tool Manager
+    # Tool Manager — all platform tools via MCP
     - to:
         - namespaceSelector:
             matchLabels:
@@ -66,7 +81,11 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
-    # HTTPS — Anthropic API, web tools, Telegram/Slack/Discord webhooks, MCP tools, ClawHub skills
+    # HTTPS — channel adapter webhooks (Slack, Telegram, Discord, etc.)
+    # and other cluster-external HTTPS dependencies. NOT for Anthropic /
+    # OpenAI (blocked via the layered defense documented in the file
+    # header). Vanilla K8s NetworkPolicy cannot enforce FQDN-level rules
+    # here; see header note about Cilium/Calico v2 hardening.
     - ports:
         - port: 443
           protocol: TCP
