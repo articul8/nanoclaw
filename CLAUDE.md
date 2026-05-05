@@ -1,3 +1,70 @@
+# AgentMesh fork — `a8-claw` runtime
+
+**This is the [articul8/nanoclaw](https://github.com/articul8/nanoclaw) fork of [qwibitai/nanoclaw](https://github.com/qwibitai/nanoclaw) v2 — not the upstream project.**
+
+This repo is `a8-claw`, the conversational mission runtime for the AgentMesh platform. It runs alongside `a8-code` (autonomous AI-engineer runtime) and `atomic-agent` (distributed mission worker) under one unified mission engine. See [SESSION_KICKOFF.md](./SESSION_KICKOFF.md) and the agentmesh-side [ADR-cb87ff61](https://github.com/articul8/a8-agentmesh/blob/agentmesh/docs/adr/ADR-cb87ff61-A8_CLAW_CONVERSATIONAL_RUNTIME_20260505T0449Z.md) for design rationale.
+
+## Lane discipline — what this fork modifies
+
+| Modify (fork-specific) | Don't touch (upstream-mergeable) |
+|---|---|
+| `src/channels/mission-queue/` — new RabbitMQ adapter consuming `agent_execute` | Upstream nanoclaw core (`src/index.ts`, `src/router.ts`, `src/delivery.ts`, `src/session-manager.ts`, `src/container-runner.ts`, `src/db/`, `container/agent-runner/`, `src/host-sweep.ts`, `src/group-init.ts`) |
+| `src/auth/` — tenant context, egress allowlist (defense-in-depth) | Upstream channel adapters under `src/channels/` other than `mission-queue/` — they ship as-is, authenticated via end-user SSO/OAuth |
+| `src/integration/` — Model Manager base URL + Tool Manager MCP wiring + persona interpolation | Upstream `container/skills/`, `src/providers/`, `setup/`, migration scripts |
+| `templates/agent-groups/` — persona templates (`perception-analyst` for v1) | Upstream tests under `tests/` (add to `tests/integration/mission-queue/`) |
+| `k8s/` — AgentMesh deployment manifests | |
+| top of this `CLAUDE.md` (above the upstream `STOP` banner) | upstream `CLAUDE.md` content (everything from the `STOP` banner onward — kept verbatim to minimize merge friction) |
+
+The narrow modification surface is what keeps `git fetch upstream && git merge upstream/main` cheap. If you find yourself wanting to change something in the right column, stop and ask — that's a structural decision, not a tactical one.
+
+## Wire contract
+
+[`RUNTIME_CONTRACT_20260505.md`](./RUNTIME_CONTRACT_20260505.md) at the root of this repo defines the wire contract between the AgentMesh mission engine and every runtime (atomic-agent, a8-code, a8-claw). **Read-only after first commit.** All three runtimes conform to the same envelopes (`agent_execute`, `mission_completions`), header conventions (`X-Tenant-ID`, `X-User-ID`, `X-Mission-Token`), audit `event_kind` enum, egress invariants, and persona interpolation pattern. If you need to change something there, stop coding and coordinate a cross-runtime PR — see [SESSION_KICKOFF.md §6](./SESSION_KICKOFF.md).
+
+## Storage architecture — container ephemeral, platform durable
+
+| Where state goes | Lifetime | What lives there |
+|---|---|---|
+| Per-session container scratch (`emptyDir`, sized per tier) | ephemeral — dies with the container | nanoclaw's session SQLite DBs (`inbound.db`, `outbound.db`), file uploads, working files |
+| Warp services (graph, episodes, semantic memory, audit ledger) | durable, multi-session | conversation history (episodes), confirmed facts (semantic), mission events (`mission_events`) |
+| metering-service | durable, billing | claw-runtime-minutes × tier-weight; LLM/Tool calls (correlation-tagged, mostly metered upstream by Model Manager / Tool Manager) |
+
+A pod can die, restart, get preempted — session state survives because everything important is in Warp. **No durable PVC mounted into containers.**
+
+## Egress — infrastructure-enforced at the pod boundary
+
+| Reachable | Blocked |
+|---|---|
+| Model Manager — all inference | `api.anthropic.com` |
+| Tool Manager — all platform tools (MCP) | `api.openai.com` and other model-provider endpoints |
+| Warp — graph, memory, audit, metering | general public internet (use Tool Manager `web_search` for that) |
+| RabbitMQ — mission queues + per-mission bus | |
+| Channel adapter targets (Slack/Telegram/Discord/etc., per allowlist) | |
+
+**Inference NEVER bypasses Model Manager.** No Anthropic API key in container env; the SDK is configured with `ANTHROPIC_BASE_URL = MODEL_MANAGER_URL`. Bypass attempts fail at the NetworkPolicy layer, not at runtime.
+
+## Tier model + per-minute billing
+
+Tiered variants — `claw-tiny` / `claw-small` / `claw-medium` / `claw-large` / `claw-xl` — bundle CPU + memory + ephemeral scratch. Tier selection at dispatch is `context.scratch_tier` on the `agent_execute` envelope (the `context` object is open per contract §2.1; defaults to `claw-medium`). Each tier has its own `SandboxTemplate` + `SandboxWarmPool` keyed by pod label `agentmesh.io/claw-tier`. Billed per claw-runtime-minute × tier-weight; correlation tags on every outbound call let metering-service apply tier-aware pricing.
+
+## Tenant + user scoping — non-negotiable security invariant
+
+Every container, queue subscription, Warp HTTP call, and metering emission is scoped by **both** `tenant_id` AND `user_id`. Pod env vars `TENANT_ID` and `USER_ID` are set by the warm-pool allocator at scheduling time. The runtime propagates them as `X-Tenant-ID` and `X-User-ID` headers via a single HTTP-client wrapper at `src/auth/tenant-context.ts` — never per-call. Tenant-only scoping is a security breach.
+
+## Remotes
+
+- `origin` → `articul8/nanoclaw` (canonical AgentMesh fork)
+- `personal` → `a8arun/nanoclaw` (personal-fork tier)
+- `upstream` → `qwibitai/nanoclaw` (open-source root)
+
+```bash
+# Pull upstream changes:
+git fetch upstream
+git merge upstream/main           # conflicts should be confined to this top section
+```
+
+---
+
 # ⚠️ STOP — READ THIS FIRST IF YOU ARE CLAUDE ⚠️
 
 **If you are reading this because you just ran `git pull`, `git merge`, `git fetch && git merge`, or any equivalent to bring in upstream changes — and you see merge conflicts or a large diff involving this file — HALT IMMEDIATELY.**
