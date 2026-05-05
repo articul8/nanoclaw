@@ -1,0 +1,116 @@
+# a8-claw SandboxTemplate — Kubernetes Agent Sandbox
+# NanoClaw (TypeScript/OpenClaw) running inside gVisor-isolated pods.
+# Each chat session gets its own Sandbox with PVC for conversation persistence.
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxTemplate
+metadata:
+  name: a8-claw-template
+  namespace: aks-agentmesh-apps
+  labels:
+    agentmesh.io/agent-type: a8-claw
+    agentmesh.io/component: sandbox-template
+spec:
+  template:
+    spec:
+      # gVisor runtime — same isolation as a8-code
+      runtimeClassName: gvisor
+
+      nodeSelector:
+        kubernetes.io/arch: amd64
+
+      serviceAccountName: a8-claw-sa
+
+      containers:
+        - name: a8-claw
+          image: 641727684734.dkr.ecr.us-west-2.amazonaws.com/a8-claw:latest
+          ports:
+            - containerPort: 8040
+              name: health
+            - containerPort: 3000
+              name: nanoclaw
+
+          env:
+            # ── Secrets ─────────────────────────────────────────────
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: a8-claw-secrets
+                  key: anthropic-api-key
+
+            # ── Warp connection ─────────────────────────────────────
+            - name: WARP_BASE_URL
+              value: "http://aks-warp-service.aks-warp-apps.svc.cluster.local:8000"
+
+            # ── NanoClaw config ─────────────────────────────────────
+            - name: NANOCLAW_PORT
+              value: "3000"
+            - name: NANOCLAW_SKILLS_DIR
+              value: "/app/skills"
+
+          resources:
+            # a8-claw is lighter than a8-code (chat, not heavy compute)
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+
+          volumeMounts:
+            - name: session-data
+              mountPath: /workspace
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: skills
+              mountPath: /app/skills
+              readOnly: true
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8040
+            initialDelaySeconds: 10
+            periodSeconds: 30
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8040
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+
+      volumes:
+        - name: session-data
+          persistentVolumeClaim:
+            claimName: ""
+
+        - name: config
+          configMap:
+            name: a8-claw-config
+
+        - name: skills
+          configMap:
+            name: a8-claw-skills
+
+      terminationGracePeriodSeconds: 15
+
+  volumeClaimTemplates:
+    - metadata:
+        name: session-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: efs-sc
+        resources:
+          requests:
+            storage: 5Gi  # Smaller than a8-code — chat state, not heavy data

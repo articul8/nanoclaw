@@ -1,0 +1,18 @@
+# a8-claw SandboxWarmPool — Higher replica count than a8-code
+# More users chat than run autonomous sessions, so warm pool is larger.
+---
+apiVersion: extensions.agents.x-k8s.io/v1alpha1
+kind: SandboxWarmPool
+metadata:
+  name: a8-claw-warm-pool
+  namespace: aks-agentmesh-apps
+  labels:
+    agentmesh.io/agent-type: a8-claw
+    agentmesh.io/component: warm-pool
+spec:
+  templateRef:
+    name: a8-claw-template
+  # More chat sessions than code sessions.
+  # a8-claw: 10 warm pods. a8-code: 5 warm pods.
+  # Scale based on demand: enterprise = 20-30.
+  replicas: 10

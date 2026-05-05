@@ -1,0 +1,72 @@
+# a8-claw NetworkPolicy — Same base rules as a8-code, plus chat channel webhooks.
+#
+# a8-claw can reach everything a8-code can, plus:
+#   ✅ Telegram Bot API (api.telegram.org:443)
+#   ✅ Slack API (api.slack.com:443)
+#   ✅ Discord API (discord.com:443)
+# These are covered by the general HTTPS (port 443) egress rule.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: a8-claw-network-policy
+  namespace: aks-agentmesh-apps
+  labels:
+    agentmesh.io/agent-type: a8-claw
+    agentmesh.io/component: security
+spec:
+  podSelector:
+    matchLabels:
+      agentmesh.io/agent-type: a8-claw
+  policyTypes:
+    - Egress
+    - Ingress
+  ingress:
+    # Health checks + NanoClaw web interface from within namespace
+    - from:
+        - podSelector: {}
+      ports:
+        - port: 8040
+          protocol: TCP
+        - port: 3000
+          protocol: TCP
+    # External ingress for web chat (via ingress controller)
+    - from: []
+      ports:
+        - port: 3000
+          protocol: TCP
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Warp API
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aks-warp-apps
+      ports:
+        - port: 8000
+          protocol: TCP
+    # Model Manager
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aks-model-manager-apps
+      ports:
+        - port: 8000
+          protocol: TCP
+    # Tool Manager
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aks-tool-manager-apps
+      ports:
+        - port: 8080
+          protocol: TCP
+    # HTTPS — Anthropic API, web tools, Telegram/Slack/Discord webhooks, MCP tools, ClawHub skills
+    - ports:
+        - port: 443
+          protocol: TCP
