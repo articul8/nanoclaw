@@ -1,11 +1,17 @@
 /**
  * Main-model API key resolver for direct routing (RUNTIME_CONTRACT v1.1 §7.1).
  *
- * Used at session spawn time when MAIN_MODEL_ROUTE=direct. Tries, in order:
+ * Provider-agnostic. The configured provider can be Anthropic, Google
+ * Gemini, or any OpenAI-compatible service (Together, Fireworks, Groq,
+ * vLLM-deployed local models, etc.); the key resolver doesn't care
+ * which — it just produces the API key string. The provider selection
+ * + base URL handling happen in main-model-route.ts.
+ *
+ * Used at session spawn when MAIN_MODEL_ROUTE=direct. Tries, in order:
  *
  *   1. user-byok via vault — the user's own API key, if they've supplied one
  *   2. tenant-vault — the tenant-level operator-managed key
- *   3. env fallback — ANTHROPIC_API_KEY in process.env (local dev or
+ *   3. env fallback — MAIN_MODEL_API_KEY in process.env (local dev or
  *      single-tenant K8s Secret bootstrap)
  *   4. fail — MainModelKeyNotFoundError with diagnostic context
  *
@@ -34,9 +40,10 @@ export class MainModelKeyNotFoundError extends Error {
     super(
       `[main-model-credentials] no main-model API key resolved for ` +
         `tenant=${tenantId} user=${userId}. Tried (1) user-byok via vault, ` +
-        `(2) tenant-vault, (3) ANTHROPIC_API_KEY env. For local dev, set ` +
-        `ANTHROPIC_API_KEY in your .env. For cloud, populate the per-tenant ` +
-        `a8-claw-secrets.anthropic-api-key Secret or wait for vault integration.`,
+        `(2) tenant-vault, (3) MAIN_MODEL_API_KEY env. For local dev, set ` +
+        `MAIN_MODEL_API_KEY in your .env (any provider — Anthropic, Google ` +
+        `Gemini, or OpenAI-compatible). For cloud, populate the per-tenant ` +
+        `a8-claw-secrets.main-model-api-key Secret or wait for vault integration.`,
     );
     this.name = 'MainModelKeyNotFoundError';
   }
@@ -69,8 +76,19 @@ async function fetchTenantApiKey(_tenantId: string): Promise<string | null> {
 }
 
 /**
+ * Read the env-fallback key. Reads MAIN_MODEL_API_KEY (canonical name)
+ * with ANTHROPIC_API_KEY as a backwards-compat fallback for operators
+ * who already have the older env name set.
+ */
+function readEnvKey(): string | undefined {
+  return process.env.MAIN_MODEL_API_KEY ?? process.env.ANTHROPIC_API_KEY;
+}
+
+/**
  * Resolve the main-model API key. Throws MainModelKeyNotFoundError if
- * no key is found in any tier.
+ * no key is found in any tier. Provider-agnostic — same lookup whether
+ * the runtime is configured for Anthropic, Google Gemini, or
+ * OpenAI-compatible.
  */
 export async function resolveMainModelKey(opts: ResolveOptions): Promise<MainModelCredentials> {
   const userKey = await fetchUserApiKey(opts.tenantId, opts.userId);
@@ -83,7 +101,7 @@ export async function resolveMainModelKey(opts: ResolveOptions): Promise<MainMod
     return { apiKey: tenantKey, source: 'tenant-vault' };
   }
 
-  const envKey = process.env.ANTHROPIC_API_KEY;
+  const envKey = readEnvKey();
   if (envKey && envKey.length > 0) {
     return { apiKey: envKey, source: 'env' };
   }
