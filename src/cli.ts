@@ -16,11 +16,12 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { spawn, spawnSync } from 'child_process';
 
-import { cancel, intro, isCancel, outro, password, select, text } from '@clack/prompts';
+import { cancel, intro, isCancel, note, outro, password, select, text } from '@clack/prompts';
 import kleur from 'kleur';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -34,6 +35,26 @@ const STAGING_WARP_URL = 'http://a7467be8f89754f7b80eff560d5e20d0-00b1550d014a24
 const STAGING_MM_URL = 'http://a667db70e77234d45ad009f6ad39ec73-1362220438.us-west-2.elb.amazonaws.com:8000';
 
 type EnvDict = Record<string, string>;
+
+/** Local-dev placeholder identity. Used in offline mode (no platform connectivity). */
+const LOCAL_TENANT_PREFIX = 'local-dev-tenant';
+
+/** Connection states recorded in .env / shown via status. */
+type ConnectionState = 'offline' | 'connected';
+
+/** Derive a deterministic local user id from the OS user when offline. */
+function localUserId(): string {
+  try {
+    return os.userInfo().username || process.env.USER || 'local-user';
+  } catch {
+    return process.env.USER || 'local-user';
+  }
+}
+
+/** Local-dev placeholder tenant — clearly identifies offline / not-yet-connected sessions. */
+function localTenantId(): string {
+  return LOCAL_TENANT_PREFIX;
+}
 
 // ─── env file IO ────────────────────────────────────────────────────
 
@@ -61,23 +82,29 @@ function readEnv(): EnvDict {
 
 /**
  * Write .env by templating .env.example — preserves comments + structure,
- * substitutes the keys we have values for.
+ * substitutes the keys we have values for. MERGES with the existing .env
+ * so partial writes (e.g. from `connect` updating only TENANT_ID +
+ * USER_ID + CONNECTION_STATE) don't blow away previously-configured keys
+ * like the API key.
  */
 function writeEnv(updates: EnvDict): void {
+  const existing = readEnv();
+  const merged: EnvDict = { ...existing, ...updates };
   const tmpl = fs.readFileSync(ENV_EXAMPLE, 'utf8');
   const written = new Set<string>();
   const out: string[] = [];
   for (const line of tmpl.split('\n')) {
     const m = line.match(/^([A-Z_]+)=/);
-    if (m && updates[m[1]] !== undefined) {
-      out.push(`${m[1]}=${updates[m[1]]}`);
+    if (m && merged[m[1]] !== undefined) {
+      out.push(`${m[1]}=${merged[m[1]]}`);
       written.add(m[1]);
     } else {
       out.push(line);
     }
   }
-  // Append any keys not present in the template (rare; defensive)
-  for (const [k, v] of Object.entries(updates)) {
+  // Append any keys not present in the template (defensive — keeps
+  // values like CONNECTION_STATE alive even if the template doesn't list them).
+  for (const [k, v] of Object.entries(merged)) {
     if (!written.has(k)) out.push(`${k}=${v}`);
   }
   fs.writeFileSync(ENV_PATH, out.join('\n'), 'utf8');
@@ -95,27 +122,14 @@ async function configure(): Promise<void> {
   const existing = readEnv();
   intro('a8-claw configure');
 
-  const tenantId = await text({
-    message: 'TENANT_ID',
-    placeholder: 'tenant-acme',
-    initialValue: existing.TENANT_ID,
-    validate: (v) => (v && v.length > 0 ? undefined : 'Required (tenant-only scoping is a security breach)'),
-  });
-  if (isCancel(tenantId)) {
-    cancel('configuration cancelled');
-    process.exit(0);
-  }
-
-  const userId = await text({
-    message: 'USER_ID',
-    placeholder: 'user-arun',
-    initialValue: existing.USER_ID,
-    validate: (v) => (v && v.length > 0 ? undefined : 'Required'),
-  });
-  if (isCancel(userId)) {
-    cancel('configuration cancelled');
-    process.exit(0);
-  }
+  // Tenant + user are PLATFORM internals — not user-facing prompts. We
+  // derive offline placeholders here; the connect subcommand resolves
+  // real values from the platform once auth lands. Existing values
+  // (e.g. from a prior `connect`) are preserved.
+  const tenantId = existing.TENANT_ID || localTenantId();
+  const userId = existing.USER_ID || localUserId();
+  const connectionState: ConnectionState =
+    (existing.CONNECTION_STATE as ConnectionState) || 'offline';
 
   const route = await select({
     message: 'Main-model routing',
@@ -149,7 +163,11 @@ async function configure(): Promise<void> {
   }
 
   const PROVIDER_DEFAULTS = {
-    anthropic: { url: 'https://api.anthropic.com', model: 'claude-sonnet-4-6', keyHint: 'Anthropic API key (sk-ant-...)' },
+    anthropic: {
+      url: 'https://api.anthropic.com',
+      model: 'claude-sonnet-4-6',
+      keyHint: 'Anthropic API key (sk-ant-...)',
+    },
     google: { url: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash', keyHint: 'Google API key' },
     'openai-compat': { url: 'https://api.openai.com', model: 'gpt-4o', keyHint: 'API key (provider-specific format)' },
   } as const;
@@ -222,6 +240,7 @@ async function configure(): Promise<void> {
   const updates: EnvDict = {
     TENANT_ID: tenantId,
     USER_ID: userId,
+    CONNECTION_STATE: connectionState,
     MAIN_MODEL_ROUTE: route,
     MAIN_MODEL_PROVIDER: provider,
     MAIN_MODEL_BASE_URL: baseUrl,
@@ -232,6 +251,20 @@ async function configure(): Promise<void> {
   if (apiKey) updates.MAIN_MODEL_API_KEY = apiKey;
 
   writeEnv(updates);
+
+  if (connectionState === 'offline') {
+    note(
+      [
+        `Identity: ${kleur.dim(`${tenantId} / ${userId}`)} ${kleur.yellow('(offline placeholder)')}`,
+        '',
+        `Running in ${kleur.yellow('OFFLINE')} mode — chat works but platform features (memory,`,
+        `audit, cross-session graph) are pending.`,
+        '',
+        `When you have AgentMesh credentials, run:  ${kleur.cyan('./a8-claw connect')}`,
+      ].join('\n'),
+      'configured',
+    );
+  }
   outro(`Wrote ${ENV_PATH}`);
 }
 
@@ -306,9 +339,16 @@ async function cmdStart(): Promise<void> {
   ensureBuild();
   ensureSetup();
 
+  const connState = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
   console.error('');
   console.error(`✓  a8-claw starting`);
-  console.error(`   tenant=${env.TENANT_ID}  user=${env.USER_ID}  route=${env.MAIN_MODEL_ROUTE ?? 'direct'}`);
+  if (connState === 'offline') {
+    console.error(`   ${kleur.yellow('OFFLINE')}  identity=${env.TENANT_ID} / ${env.USER_ID}  ${kleur.dim('(local placeholder)')}`);
+    console.error(`   ${kleur.dim('Platform features pending.  Run ./a8-claw connect to authenticate.')}`);
+  } else {
+    console.error(`   ${kleur.green('connected')}  ${env.TENANT_ID} / ${env.USER_ID}`);
+  }
+  console.error(`   route=${env.MAIN_MODEL_ROUTE ?? 'direct'}  provider=${env.MAIN_MODEL_PROVIDER ?? 'anthropic'}  model=${env.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6'}`);
   console.error(`   warp=${env.WARP_URL}`);
   console.error(`   model_manager=${env.MODEL_MANAGER_URL}`);
   console.error('');
@@ -317,6 +357,92 @@ async function cmdStart(): Promise<void> {
 
   const child = spawn('pnpm', ['dev'], { cwd: ROOT, stdio: 'inherit', env: process.env });
   child.on('exit', (code) => process.exit(code ?? 0));
+}
+
+/**
+ * Authenticate with the AgentMesh platform and resolve real tenant_id +
+ * user_id, replacing the offline placeholders. The platform's auth
+ * endpoint isn't exposed yet — when it is, this function will POST a
+ * PAT (or initiate device-code flow) and update .env on success. Today
+ * it surfaces the gap and stays offline.
+ */
+async function cmdConnect(): Promise<void> {
+  const env = readEnv();
+  if (!env.WARP_URL) {
+    console.error(`✗  WARP_URL not set; run ./a8-claw configure first.`);
+    process.exit(1);
+  }
+  intro('a8-claw connect');
+
+  // Try the platform auth endpoint. v1 stub: assume POST {WARP_URL}/auth/whoami
+  // with Bearer PAT returns {tenant_id, user_id}. If endpoint absent, fail
+  // gracefully and stay offline.
+  const pat = await password({
+    message: 'AgentMesh PAT (paste from platform settings, or empty to cancel)',
+  });
+  if (isCancel(pat) || !pat) {
+    cancel('connect cancelled — staying offline');
+    return;
+  }
+
+  const url = `${env.WARP_URL.replace(/\/+$/, '')}/auth/whoami`;
+  let resp: Response;
+  try {
+    resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pat}` },
+      body: JSON.stringify({}),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    note(
+      [
+        kleur.yellow('Could not reach the platform auth endpoint:'),
+        `  ${msg}`,
+        '',
+        `Staying ${kleur.yellow('OFFLINE')}. Pending work will sync when the platform is reachable.`,
+      ].join('\n'),
+      'no platform connectivity',
+    );
+    outro('offline mode');
+    return;
+  }
+
+  if (resp.status === 404) {
+    note(
+      [
+        kleur.yellow('The platform auth endpoint is not yet exposed by Warp.'),
+        '',
+        `Tried:  ${kleur.dim(url)}`,
+        '',
+        'Staying offline. The runtime tags work as "first-connect-pending"',
+        'and will refresh tenant + user identity on the first successful connect.',
+      ].join('\n'),
+      'auth endpoint pending',
+    );
+    outro('offline mode');
+    return;
+  }
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    cancel(`auth failed: ${resp.status} ${resp.statusText}  ${text.slice(0, 200)}`);
+    return;
+  }
+
+  const data = (await resp.json()) as { tenant_id?: string; user_id?: string };
+  if (!data.tenant_id || !data.user_id) {
+    cancel(`auth response missing tenant_id / user_id: ${JSON.stringify(data)}`);
+    return;
+  }
+
+  // Persist resolved identity. PAT not stored on disk — re-prompted next connect.
+  writeEnv({
+    TENANT_ID: data.tenant_id,
+    USER_ID: data.user_id,
+    CONNECTION_STATE: 'connected',
+  });
+  outro(`connected as ${data.tenant_id} / ${data.user_id}`);
 }
 
 async function cmdChat(args: string[]): Promise<void> {
@@ -356,7 +482,13 @@ async function cmdStatus(): Promise<void> {
   if (errors.length > 0) {
     for (const e of errors) warn(e);
   } else {
-    ok(`tenant=${env.TENANT_ID} user=${env.USER_ID} route=${env.MAIN_MODEL_ROUTE ?? 'direct'}`);
+    const cs = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
+    if (cs === 'connected') {
+      ok(`connected — tenant=${env.TENANT_ID} user=${env.USER_ID}`);
+    } else {
+      warn(`OFFLINE — using local placeholder identity (${env.TENANT_ID} / ${env.USER_ID}); run ./a8-claw connect to authenticate`);
+    }
+    ok(`route=${env.MAIN_MODEL_ROUTE ?? 'direct'} provider=${env.MAIN_MODEL_PROVIDER ?? 'anthropic'} model=${env.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6'}`);
   }
   if (fs.existsSync(path.join(ROOT, 'node_modules'))) ok('node_modules present');
   else warn('deps not installed (run ./a8-claw build)');
@@ -375,15 +507,19 @@ function printHelp(): void {
 Usage:
   a8-claw                  Start the host (auto-bootstrap + first-run configure)
   a8-claw chat MESSAGE     Send a chat message via local CLI socket
-  a8-claw configure        Interactive (re)configuration of .env
+  a8-claw configure        Interactive configuration of provider, key, model, URLs
   a8-claw --configure      Same, as a flag
+  a8-claw connect          Authenticate with the AgentMesh platform; resolves
+                           real tenant + user identity (graduates offline → connected)
   a8-claw setup            Run nanoclaw setup (DB init, container build)
   a8-claw build            Build TypeScript
-  a8-claw status           Show health / state
+  a8-claw status           Show health / connection state
   a8-claw -h | --help      Show this help
 
-First run: prompts you for tenant, user, API key, and routing — then writes
-.env and starts the host. Re-run --configure any time to update.
+First run: configure prompts only for things you actually decide (provider,
+API key, model). Tenant + user identity defaults to offline placeholders
+and is resolved from the platform via 'connect' once you have an AgentMesh
+PAT — runtime tags work as 'first-connect-pending' until then.
 `;
   console.log(help);
 }
@@ -399,6 +535,10 @@ async function main(): Promise<void> {
   }
   if (args.includes('--configure') || args[0] === 'configure') {
     await configure();
+    return;
+  }
+  if (args[0] === 'connect') {
+    await cmdConnect();
     return;
   }
 
