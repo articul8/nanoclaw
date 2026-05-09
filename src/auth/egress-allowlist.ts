@@ -1,49 +1,88 @@
 /**
- * Egress allowlist — defense-in-depth for the bifurcated model-routing
- * invariant from RUNTIME_CONTRACT_20260505.md §7 / §7.1 (v1.1).
+ * Egress allowlist — defense-in-depth for the bifurcated, provider-agnostic
+ * model-routing invariant from RUNTIME_CONTRACT_20260505.md §7 / §7.1 (v1.1).
  *
- * Two axes of denial:
- *   1. Non-configured LLM providers (api.openai.com, api.cohere.ai, …)
- *      — always denied.
- *   2. The configured main-model provider (currently api.anthropic.com)
- *      — denied UNLESS MAIN_MODEL_ROUTE=direct. In direct mode the
- *      runtime sends main-model traffic direct to the provider and
- *      self-reports metering to metering-service. In model_manager mode
- *      (or unset), the runtime is expected to route through Model Manager
- *      via ANTHROPIC_BASE_URL = ${MODEL_MANAGER_URL}/run/{uuid}.
+ * Rules:
+ *   - Hosts NOT on the known-LLM-provider list are unconstrained here
+ *     (NetworkPolicy is the actual enforcement; that's an unknown/custom
+ *     host such as a self-hosted vLLM endpoint or a Together/Fireworks
+ *     URL — handled by infrastructure).
+ *
+ *   - Hosts on the known-LLM-provider list are DENIED unless ALL of:
+ *       1. MAIN_MODEL_ROUTE=direct
+ *       2. The host matches the runtime's configured main-model provider
+ *          (derived from MAIN_MODEL_BASE_URL hostname, or the provider
+ *          default for MAIN_MODEL_PROVIDER).
+ *
+ * Concretely: if the runtime is configured for Anthropic in direct mode,
+ * api.anthropic.com is reachable but api.openai.com / api.cohere.ai /
+ * api.gemini / etc. are not. Switch the configured provider to Google
+ * and api.anthropic.com flips to denied; generativelanguage.googleapis.com
+ * flips to allowed. Etc.
  *
  * The K8s NetworkPolicy is the primary network-layer enforcement. This
- * module is a runtime-side belt: HTTP wrappers refuse to fire requests
- * to denied hosts with a descriptive error, before the call ever leaves.
+ * module is a runtime-side belt: HTTP wrappers fail fast on bypass
+ * attempts with a descriptive error.
  */
 
+import type { MainModelProvider } from '../integration/main-model-route.js';
+
 /**
- * Non-configured LLM provider domains. Always blocked, regardless of
- * MAIN_MODEL_ROUTE. Add new providers here as discovered.
+ * Known LLM-provider hostnames. The configured provider's host (one of
+ * these, or a custom URL not in this set) is allowed in direct mode;
+ * the rest are blocked. Add new providers here as discovered.
  */
-export const ALWAYS_DENIED_HOSTS: ReadonlySet<string> = new Set([
+export const KNOWN_LLM_PROVIDER_HOSTS: ReadonlySet<string> = new Set([
+  'api.anthropic.com',
   'api.openai.com',
   'api.cohere.ai',
   'api.mistral.ai',
-  'generativelanguage.googleapis.com', // Gemini
+  'generativelanguage.googleapis.com', // Google Gemini
   'api.together.xyz',
+  'api.fireworks.ai',
+  'api.groq.com',
   'api.deepseek.com',
 ]);
 
-/** Hostname of the configured main-model provider. */
-const MAIN_PROVIDER_HOST = 'api.anthropic.com';
+/** Default host per provider, used when MAIN_MODEL_BASE_URL is unset. */
+const PROVIDER_DEFAULT_HOST: Record<MainModelProvider, string> = {
+  anthropic: 'api.anthropic.com',
+  google: 'generativelanguage.googleapis.com',
+  'openai-compat': 'api.openai.com',
+};
 
-/** True when the runtime is configured for direct main-model routing. */
 function isDirectMainModelRoute(): boolean {
   return process.env.MAIN_MODEL_ROUTE === 'direct';
 }
 
+function getConfiguredProvider(): MainModelProvider {
+  const v = process.env.MAIN_MODEL_PROVIDER;
+  if (v === 'google') return 'google';
+  if (v === 'openai-compat') return 'openai-compat';
+  return 'anthropic';
+}
+
 /**
- * Returns true if the URL's host is on the deny list under current config:
- *   - ALWAYS_DENIED_HOSTS: true regardless of route.
- *   - Main-model provider: true UNLESS MAIN_MODEL_ROUTE=direct.
- *   - Anything else: false.
- * Malformed URLs return false (defer to fetch for a better error).
+ * The hostname we'd hit in direct mode for the configured provider.
+ * Prefers MAIN_MODEL_BASE_URL when set (allows custom self-hosted /
+ * proxy URLs); falls back to the per-provider default. Returns null
+ * if MAIN_MODEL_BASE_URL is set but malformed.
+ */
+function getConfiguredProviderHost(): string | null {
+  const customUrl = process.env.MAIN_MODEL_BASE_URL;
+  if (customUrl) {
+    try {
+      return new URL(customUrl).hostname;
+    } catch {
+      return null;
+    }
+  }
+  return PROVIDER_DEFAULT_HOST[getConfiguredProvider()];
+}
+
+/**
+ * Returns true if the URL's host is denied under the current configuration.
+ * Malformed URLs return false (defer to fetch for the better error).
  */
 export function isDenied(url: string): boolean {
   let host: string;
@@ -52,20 +91,22 @@ export function isDenied(url: string): boolean {
   } catch {
     return false;
   }
-  if (ALWAYS_DENIED_HOSTS.has(host)) return true;
-  if (host === MAIN_PROVIDER_HOST && !isDirectMainModelRoute()) return true;
-  return false;
+  if (!KNOWN_LLM_PROVIDER_HOSTS.has(host)) return false;
+  // Known LLM provider host. Allow only if direct mode AND it's the configured one.
+  if (!isDirectMainModelRoute()) return true;
+  return host !== getConfiguredProviderHost();
 }
 
-/**
- * Throws a descriptive error if the URL's host is denied. Use as a guard
- * inside HTTP wrappers (e.g. platformFetch) to catch bypass attempts.
- */
+/** Throws a descriptive error if the URL's host is denied. */
 export function assertAllowed(url: string): void {
   if (!isDenied(url)) return;
   const host = new URL(url).hostname;
-  const reason = ALWAYS_DENIED_HOSTS.has(host)
-    ? `${host} is a non-configured LLM provider; only the runtime's configured main-model provider is permitted (and only when MAIN_MODEL_ROUTE=direct)`
-    : `MAIN_MODEL_ROUTE is "${process.env.MAIN_MODEL_ROUTE ?? '<unset>'}", not "direct"; either set MAIN_MODEL_ROUTE=direct (and provide ANTHROPIC_API_KEY) or use Model Manager via ANTHROPIC_BASE_URL`;
+  let reason: string;
+  if (!isDirectMainModelRoute()) {
+    reason = `MAIN_MODEL_ROUTE is "${process.env.MAIN_MODEL_ROUTE ?? '<unset>'}", not "direct"; either set MAIN_MODEL_ROUTE=direct or use Model Manager`;
+  } else {
+    const configured = getConfiguredProviderHost();
+    reason = `the configured main-model provider is "${getConfiguredProvider()}" (host: ${configured}); ${host} is a different LLM provider and non-configured providers are always blocked`;
+  }
   throw new Error(`[egress-allowlist] direct call to ${host} is blocked: ${reason}. URL: ${url}`);
 }
