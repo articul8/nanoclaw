@@ -67,7 +67,5 @@ export function assertAllowed(url: string): void {
   const reason = ALWAYS_DENIED_HOSTS.has(host)
     ? `${host} is a non-configured LLM provider; only the runtime's configured main-model provider is permitted (and only when MAIN_MODEL_ROUTE=direct)`
     : `MAIN_MODEL_ROUTE is "${process.env.MAIN_MODEL_ROUTE ?? '<unset>'}", not "direct"; either set MAIN_MODEL_ROUTE=direct (and provide ANTHROPIC_API_KEY) or use Model Manager via ANTHROPIC_BASE_URL`;
-  throw new Error(
-    `[egress-allowlist] direct call to ${host} is blocked: ${reason}. URL: ${url}`
-  );
+  throw new Error(`[egress-allowlist] direct call to ${host} is blocked: ${reason}. URL: ${url}`);
 }

@@ -88,15 +88,13 @@ describe('resolveMainModelConfig — direct mode', () => {
   it('throws if no key resolvable', async () => {
     setAll({ route: 'direct', key: undefined, model: 'claude-sonnet-4-6' });
     await expect(resolveMainModelConfig({ tenantId: 't', userId: 'u' })).rejects.toThrow(
-      /no main-model API key resolved/
+      /no main-model API key resolved/,
     );
   });
 
   it('throws if no model name available', async () => {
     setAll({ route: 'direct', key: 'k', model: undefined });
-    await expect(resolveMainModelConfig({ tenantId: 't', userId: 'u' })).rejects.toThrow(
-      /no model name available/
-    );
+    await expect(resolveMainModelConfig({ tenantId: 't', userId: 'u' })).rejects.toThrow(/no model name available/);
   });
 
   it('honors model override over env default', async () => {
@@ -116,9 +114,9 @@ describe('resolveMainModelConfig — model_manager mode', () => {
   });
 
   it('calls /resolve and returns MM run URL with the endpoint UUID', async () => {
-    const mock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ endpoint_id: 'uuid-abc-123' }), { status: 200 })
-    );
+    const mock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ endpoint_id: 'uuid-abc-123' }), { status: 200 }));
     vi.stubGlobal('fetch', mock);
 
     const cfg = await resolveMainModelConfig({ tenantId: 'tenant-test', userId: 'user-test' });
@@ -146,7 +144,7 @@ describe('resolveMainModelConfig — model_manager mode', () => {
   it('throws if MODEL_MANAGER_URL is unset', async () => {
     delete process.env.MODEL_MANAGER_URL;
     await expect(resolveMainModelConfig({ tenantId: 't', userId: 'u' })).rejects.toThrow(
-      /MODEL_MANAGER_URL env required when MAIN_MODEL_ROUTE=model_manager/
+      /MODEL_MANAGER_URL env required when MAIN_MODEL_ROUTE=model_manager/,
     );
   });
 
@@ -154,17 +152,13 @@ describe('resolveMainModelConfig — model_manager mode', () => {
     const mock = vi.fn().mockResolvedValue(new Response('not found', { status: 404, statusText: 'Not Found' }));
     vi.stubGlobal('fetch', mock);
     await expect(resolveMainModelConfig({ tenantId: 't', userId: 'u' })).rejects.toThrow(
-      /Model Manager \/resolve failed for "claude-sonnet-4-6": 404/
+      /Model Manager \/resolve failed for "claude-sonnet-4-6": 404/,
     );
   });
 
   it('throws if /resolve returns no endpoint_id', async () => {
-    const mock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ unexpected: 'shape' }), { status: 200 })
-    );
+    const mock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ unexpected: 'shape' }), { status: 200 }));
     vi.stubGlobal('fetch', mock);
-    await expect(resolveMainModelConfig({ tenantId: 't', userId: 'u' })).rejects.toThrow(
-      /returned no endpoint_id/
-    );
+    await expect(resolveMainModelConfig({ tenantId: 't', userId: 'u' })).rejects.toThrow(/returned no endpoint_id/);
   });
 });

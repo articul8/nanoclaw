@@ -43,7 +43,7 @@ export function readTenantContext(): TenantContext {
       `[tenant-context] TENANT_ID and USER_ID must both be set in env. ` +
         `Got TENANT_ID="${tenantId}", USER_ID="${userId}". ` +
         `These are populated per-pod by the warm-pool allocator at scheduling time. ` +
-        `Tenant-only scoping is a security breach — both are required.`
+        `Tenant-only scoping is a security breach — both are required.`,
     );
   }
 
@@ -84,7 +84,7 @@ export async function platformFetch(url: string, options: PlatformFetchOptions =
 export async function platformPostJson(
   url: string,
   body: unknown,
-  options: PlatformFetchOptions = {}
+  options: PlatformFetchOptions = {},
 ): Promise<Response> {
   return platformFetch(url, {
     ...options,

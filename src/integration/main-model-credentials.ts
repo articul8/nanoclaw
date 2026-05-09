@@ -29,14 +29,14 @@ export interface ResolveOptions {
 export class MainModelKeyNotFoundError extends Error {
   constructor(
     public readonly tenantId: string,
-    public readonly userId: string
+    public readonly userId: string,
   ) {
     super(
       `[main-model-credentials] no main-model API key resolved for ` +
         `tenant=${tenantId} user=${userId}. Tried (1) user-byok via vault, ` +
         `(2) tenant-vault, (3) ANTHROPIC_API_KEY env. For local dev, set ` +
         `ANTHROPIC_API_KEY in your .env. For cloud, populate the per-tenant ` +
-        `a8-claw-secrets.anthropic-api-key Secret or wait for vault integration.`
+        `a8-claw-secrets.anthropic-api-key Secret or wait for vault integration.`,
     );
     this.name = 'MainModelKeyNotFoundError';
   }

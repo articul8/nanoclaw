@@ -33,7 +33,7 @@ describe('buildMeteringRecord', () => {
         latencyMs: 1234,
         keySource: 'env',
       },
-      fixedDate
+      fixedDate,
     );
     expect(record).toEqual({
       tenant_id: 'tenant-acme',
@@ -52,17 +52,32 @@ describe('buildMeteringRecord', () => {
 
   it('passes through mission_id when set', () => {
     const r = buildMeteringRecord({
-      tenantId: 't', userId: 'u', missionId: 'mis-7', sessionId: 's',
-      modelName: 'm', tokensIn: 0, tokensOut: 0, latencyMs: 0, keySource: 'tenant-vault',
+      tenantId: 't',
+      userId: 'u',
+      missionId: 'mis-7',
+      sessionId: 's',
+      modelName: 'm',
+      tokensIn: 0,
+      tokensOut: 0,
+      latencyMs: 0,
+      keySource: 'tenant-vault',
     });
     expect(r.mission_id).toBe('mis-7');
   });
 
   it('preserves key_source values', () => {
-    expect(buildMeteringRecord({
-      tenantId: 't', userId: 'u', sessionId: 's',
-      modelName: 'm', tokensIn: 0, tokensOut: 0, latencyMs: 0, keySource: 'user-byok',
-    }).key_source).toBe('user-byok');
+    expect(
+      buildMeteringRecord({
+        tenantId: 't',
+        userId: 'u',
+        sessionId: 's',
+        modelName: 'm',
+        tokensIn: 0,
+        tokensOut: 0,
+        latencyMs: 0,
+        keySource: 'user-byok',
+      }).key_source,
+    ).toBe('user-byok');
   });
 });
 
@@ -78,8 +93,13 @@ describe('reportMainModelUsage', () => {
     vi.stubGlobal('fetch', mock);
 
     reportMainModelUsage({
-      tenantId: 'tenant-test', userId: 'user-test', sessionId: 'sess-1',
-      modelName: 'claude-sonnet-4-6', tokensIn: 50, tokensOut: 100, latencyMs: 800,
+      tenantId: 'tenant-test',
+      userId: 'user-test',
+      sessionId: 'sess-1',
+      modelName: 'claude-sonnet-4-6',
+      tokensIn: 50,
+      tokensOut: 100,
+      latencyMs: 800,
       keySource: 'env',
     });
 
@@ -112,8 +132,14 @@ describe('reportMainModelUsage', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     reportMainModelUsage({
-      tenantId: 't', userId: 'u', sessionId: 's',
-      modelName: 'm', tokensIn: 0, tokensOut: 0, latencyMs: 0, keySource: 'env',
+      tenantId: 't',
+      userId: 'u',
+      sessionId: 's',
+      modelName: 'm',
+      tokensIn: 0,
+      tokensOut: 0,
+      latencyMs: 0,
+      keySource: 'env',
     });
 
     expect(mock).not.toHaveBeenCalled();
@@ -129,15 +155,21 @@ describe('reportMainModelUsage', () => {
     // Function returns synchronously and does NOT throw
     expect(() =>
       reportMainModelUsage({
-        tenantId: 't', userId: 'u', sessionId: 's',
-        modelName: 'm', tokensIn: 1, tokensOut: 1, latencyMs: 1, keySource: 'env',
-      })
+        tenantId: 't',
+        userId: 'u',
+        sessionId: 's',
+        modelName: 'm',
+        tokensIn: 1,
+        tokensOut: 1,
+        latencyMs: 1,
+        keySource: 'env',
+      }),
     ).not.toThrow();
 
     await new Promise((r) => setImmediate(r));
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('failed to report usage'),
-      expect.stringContaining('connection refused')
+      expect.stringContaining('connection refused'),
     );
   });
 
@@ -145,14 +177,23 @@ describe('reportMainModelUsage', () => {
     process.env.METERING_USAGE_URL = 'http://aks-metering-service.svc/v1/usage';
     let resolveFetch: (v: Response) => void = () => {};
     const slowFetch = vi.fn(
-      () => new Promise<Response>((resolve) => { resolveFetch = resolve; })
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
     );
     vi.stubGlobal('fetch', slowFetch);
 
     const start = Date.now();
     reportMainModelUsage({
-      tenantId: 't', userId: 'u', sessionId: 's',
-      modelName: 'm', tokensIn: 0, tokensOut: 0, latencyMs: 0, keySource: 'env',
+      tenantId: 't',
+      userId: 'u',
+      sessionId: 's',
+      modelName: 'm',
+      tokensIn: 0,
+      tokensOut: 0,
+      latencyMs: 0,
+      keySource: 'env',
     });
     const elapsed = Date.now() - start;
     // Should be effectively instant — never awaiting the in-flight promise.

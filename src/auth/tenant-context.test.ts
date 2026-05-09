@@ -110,7 +110,7 @@ describe('platformFetch', () => {
     vi.stubGlobal('fetch', mock);
 
     await platformFetch('https://example.com/api', {
-      headers: { 'X-Custom': 'value', 'Accept': 'application/json' },
+      headers: { 'X-Custom': 'value', Accept: 'application/json' },
     });
 
     const init = mock.mock.calls[0][1] as RequestInit;
@@ -118,7 +118,7 @@ describe('platformFetch', () => {
       'X-Tenant-ID': 'tenant-acme',
       'X-User-ID': 'user-arun',
       'X-Custom': 'value',
-      'Accept': 'application/json',
+      Accept: 'application/json',
     });
   });
 
@@ -127,9 +127,7 @@ describe('platformFetch', () => {
     const mock = vi.fn().mockResolvedValue(new Response('ok'));
     vi.stubGlobal('fetch', mock);
 
-    await expect(platformFetch('https://example.com/api')).rejects.toThrow(
-      /TENANT_ID and USER_ID must both be set/
-    );
+    await expect(platformFetch('https://example.com/api')).rejects.toThrow(/TENANT_ID and USER_ID must both be set/);
     expect(mock).not.toHaveBeenCalled();
   });
 
@@ -139,7 +137,7 @@ describe('platformFetch', () => {
     vi.stubGlobal('fetch', mock);
 
     await expect(platformFetch('https://api.openai.com/v1/chat/completions')).rejects.toThrow(
-      /direct call to api\.openai\.com is blocked/
+      /direct call to api\.openai\.com is blocked/,
     );
     expect(mock).not.toHaveBeenCalled();
   });

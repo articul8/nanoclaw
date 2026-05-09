@@ -54,7 +54,9 @@ describe('isDenied — platform + channel hosts (always allowed)', () => {
       setRoute(route);
       expect(isDenied('http://aks-warp-service.aks-warp-apps.svc.cluster.local:8085/missions/m/events')).toBe(false);
       expect(isDenied('http://aks-model-manager.aks-agentmesh-apps.svc.cluster.local:8000/run/abc')).toBe(false);
-      expect(isDenied('http://aks-tool-manager.aks-tool-manager-apps.svc.cluster.local:8080/tools/x/execute')).toBe(false);
+      expect(isDenied('http://aks-tool-manager.aks-tool-manager-apps.svc.cluster.local:8080/tools/x/execute')).toBe(
+        false,
+      );
     }
   });
 
@@ -83,21 +85,21 @@ describe('assertAllowed', () => {
   it('throws with always-denied reason for non-configured providers', () => {
     setRoute('direct');
     expect(() => assertAllowed('https://api.openai.com/v1/x')).toThrow(
-      /api\.openai\.com is a non-configured LLM provider/
+      /api\.openai\.com is a non-configured LLM provider/,
     );
   });
 
   it('throws with route reason when Anthropic is blocked due to non-direct route', () => {
     setRoute('model_manager');
     expect(() => assertAllowed('https://api.anthropic.com/v1/messages')).toThrow(
-      /MAIN_MODEL_ROUTE is "model_manager", not "direct"/
+      /MAIN_MODEL_ROUTE is "model_manager", not "direct"/,
     );
   });
 
   it('throws with unset-route reason when MAIN_MODEL_ROUTE is missing', () => {
     setRoute(undefined);
     expect(() => assertAllowed('https://api.anthropic.com/v1/messages')).toThrow(
-      /MAIN_MODEL_ROUTE is "<unset>", not "direct"/
+      /MAIN_MODEL_ROUTE is "<unset>", not "direct"/,
     );
   });
 

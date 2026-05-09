@@ -22,29 +22,27 @@ describe('resolveMainModelKey', () => {
   it('throws MainModelKeyNotFoundError when no key is anywhere', async () => {
     setEnvKey(undefined);
     await expect(resolveMainModelKey({ tenantId: 'tenant-acme', userId: 'user-arun' })).rejects.toBeInstanceOf(
-      MainModelKeyNotFoundError
+      MainModelKeyNotFoundError,
     );
   });
 
   it('error message includes tenant + user for diagnostics', async () => {
     setEnvKey(undefined);
     await expect(resolveMainModelKey({ tenantId: 'tenant-acme', userId: 'user-arun' })).rejects.toThrow(
-      /tenant=tenant-acme user=user-arun/
+      /tenant=tenant-acme user=user-arun/,
     );
   });
 
   it('error message references all three tiers for triage', async () => {
     setEnvKey(undefined);
     await expect(resolveMainModelKey({ tenantId: 't', userId: 'u' })).rejects.toThrow(
-      /user-byok.*tenant-vault.*ANTHROPIC_API_KEY/s
+      /user-byok.*tenant-vault.*ANTHROPIC_API_KEY/s,
     );
   });
 
   it('treats empty-string env key as missing (falls through to error)', async () => {
     setEnvKey('');
-    await expect(resolveMainModelKey({ tenantId: 't', userId: 'u' })).rejects.toBeInstanceOf(
-      MainModelKeyNotFoundError
-    );
+    await expect(resolveMainModelKey({ tenantId: 't', userId: 'u' })).rejects.toBeInstanceOf(MainModelKeyNotFoundError);
   });
 
   it('attaches tenantId / userId to the error object for programmatic handling', async () => {

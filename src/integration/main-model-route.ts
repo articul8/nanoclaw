@@ -62,9 +62,7 @@ export function getMainModelMode(): MainModelMode {
 function resolveModelName(override?: string): string {
   const name = override ?? process.env.DEFAULT_LLM_MODEL;
   if (!name) {
-    throw new Error(
-      `[main-model-route] no model name available. Pass {model: "..."} or set DEFAULT_LLM_MODEL env.`
-    );
+    throw new Error(`[main-model-route] no model name available. Pass {model: "..."} or set DEFAULT_LLM_MODEL env.`);
   }
   return name;
 }
@@ -91,9 +89,7 @@ export async function resolveMainModelConfig(opts: ResolveOptions): Promise<Main
   // model_manager mode — resolve endpoint UUID via Model Manager
   const mmUrl = process.env.MODEL_MANAGER_URL;
   if (!mmUrl) {
-    throw new Error(
-      `[main-model-route] MODEL_MANAGER_URL env required when MAIN_MODEL_ROUTE=model_manager`
-    );
+    throw new Error(`[main-model-route] MODEL_MANAGER_URL env required when MAIN_MODEL_ROUTE=model_manager`);
   }
   const uuid = await resolveModelEndpoint(mmUrl, model);
   return {
@@ -113,13 +109,13 @@ async function resolveModelEndpoint(mmUrl: string, modelName: string): Promise<s
   const resp = await platformPostJson(url, { identifier: modelName });
   if (!resp.ok) {
     throw new Error(
-      `[main-model-route] Model Manager /resolve failed for "${modelName}": ${resp.status} ${resp.statusText}`
+      `[main-model-route] Model Manager /resolve failed for "${modelName}": ${resp.status} ${resp.statusText}`,
     );
   }
   const data = (await resp.json()) as { endpoint_id?: string };
   if (!data.endpoint_id) {
     throw new Error(
-      `[main-model-route] Model Manager /resolve for "${modelName}" returned no endpoint_id: ${JSON.stringify(data)}`
+      `[main-model-route] Model Manager /resolve for "${modelName}" returned no endpoint_id: ${JSON.stringify(data)}`,
     );
   }
   return data.endpoint_id;
