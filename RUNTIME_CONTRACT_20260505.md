@@ -1,7 +1,7 @@
 # Runtime Contract — atomic-agent | a8-code | a8-claw
 
-**Document version:** `v1.0`
-**Last updated (UTC):** `2026-05-05 06:42 UTC`
+**Document version:** `v1.1`
+**Last updated (UTC):** `2026-05-08 00:00 UTC`
 **Owner:** Mission engine (defined by ADR-20680a6f)
 **Implementers:** All three runtime sessions (atomic-agent, a8-code, a8-claw)
 
@@ -231,16 +231,25 @@ These are **infrastructure-enforced**, not runtime-enforced. Runtimes MUST NOT a
 
 | Destination | Reachable from runtime? | Notes |
 |---|---|---|
-| Model Manager (`http://aks-model-manager.aks-agentmesh-apps.svc.cluster.local`) | YES | All inference goes here |
+| Model Manager (`http://aks-model-manager.aks-agentmesh-apps.svc.cluster.local`) | YES | Auxiliary inference (sub-agent, embeddings, OCR, judges, perception models) |
 | Tool Manager (`http://aks-tool-manager.aks-tool-manager-apps.svc.cluster.local`) | YES | All platform tools (MCP) |
 | Warp (`http://aks-warp-service.aks-warp-apps.svc.cluster.local:8085`) | YES | All graph / memory / audit / metering APIs |
 | RabbitMQ (cluster-internal) | YES | mission queues + bus topics |
-| `api.anthropic.com` | **BLOCKED** | runtimes that bypass Model Manager fail loudly at the network layer |
-| `api.openai.com`, other model provider endpoints | **BLOCKED** | same — Model Manager is the only path |
+| Configured main-model provider (e.g. `api.anthropic.com`) | **CONDITIONAL** | REACHABLE when the runtime is configured for direct main-model routing (`MAIN_MODEL_ROUTE=direct`); BLOCKED otherwise. See §7.1 below. |
+| Other (non-configured) model provider endpoints (e.g. `api.openai.com`, `api.cohere.ai`, …) | **BLOCKED** | runtimes that bypass the configured path fail loudly at the runtime egress allowlist; non-configured providers are never reachable |
 | Channel adapter targets (per channel — Slack, Telegram, etc.) | YES, per allowlist | configured per channel |
 | Public internet (general) | **BLOCKED** | tools that need it must route through Tool Manager's `web_search` builtin |
 
-For a8-claw, this is enforced at the K8s NetworkPolicy boundary (`<A8CLAW>/k8s/network-policy.yaml`). For a8-code, at its pod's NetworkPolicy. For atomic-agent, at its pod's NetworkPolicy.
+For a8-claw, this is enforced at the K8s NetworkPolicy boundary (`<A8CLAW>/k8s/network-policy.yaml`) plus the runtime-side egress allowlist (`src/auth/egress-allowlist.ts`). For a8-code, at its pod's NetworkPolicy. For atomic-agent, at its pod's NetworkPolicy.
+
+### 7.1 Bifurcated model routing (v1.1)
+
+Conversational and autonomous-engineer runtimes (a8-claw, a8-code) are latency-sensitive on their **main driver model** — the Claude that runs the conversation / planning loop. To avoid the Model Manager hop on the hot path, runtimes MAY be configured to route main-model traffic directly to the provider:
+
+- `MAIN_MODEL_ROUTE = "direct"` (default for a8-claw, a8-code) — `ANTHROPIC_BASE_URL = https://api.anthropic.com`; `ANTHROPIC_API_KEY` resolved per-tenant (with per-user BYOK override) at session spawn from the platform credential service / vault. The runtime self-reports usage to metering-service after each call (async fire-and-forget) using the same row shape Model Manager would have emitted, with `source: "direct"`.
+- `MAIN_MODEL_ROUTE = "model_manager"` — `ANTHROPIC_BASE_URL = ${MODEL_MANAGER_URL}/run/{uuid}` resolved via Model Manager `/resolve` at session spawn; no API key in env; Model Manager auto-meters.
+
+**ALL OTHER model calls** (sub-agent inference, embeddings, OCR, judges, perception models, etc.) continue to route through Model Manager regardless of `MAIN_MODEL_ROUTE`. The runtime egress allowlist denies all LLM provider domains *except* the configured main-model provider when in `direct` mode. atomic-agent does not use direct routing — its workload is short-running and fan-out friendly, where Model Manager's centralized control outweighs the per-call latency.
 
 ---
 
@@ -317,6 +326,7 @@ If you find yourself needing to standardize one of these, that's a contract exte
 | Date | Author | Change |
 |---|---|---|
 | 2026-05-05 | Arun | Initial version. Locked the wire contract for atomic-agent / a8-code / a8-claw to prevent drift while three parallel implementation sessions run. |
+| 2026-05-08 | Arun | v1.1 — bifurcated model routing (§7 + §7.1): main driver model in latency-sensitive runtimes (a8-claw, a8-code) MAY route direct to the configured provider with per-tenant + per-user BYOK keys and runtime self-reported metering; all other model calls continue through Model Manager. Default for a8-claw and a8-code is `MAIN_MODEL_ROUTE=direct`. atomic-agent is unaffected. |
 
 ---
 
