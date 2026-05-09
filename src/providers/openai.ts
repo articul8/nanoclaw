@@ -1,20 +1,37 @@
 /**
- * Host-side container config for the openai-compat provider.
+ * Host-side container config for the openai-compat provider (AgentMesh fork).
  *
- * Passes OPENAI_BASE_URL / OPENAI_API_KEY / DEFAULT_LLM_MODEL through
- * to the per-session container's env so the container-side openai
- * provider (container/agent-runner/src/providers/openai.ts) can read
- * them. In production these env vars are already present on the host's
- * process.env (set by the warm-pool allocator or by the local-mode
- * .env loader); we just forward them.
+ * Passes the OpenAI-SDK-specific env (OPENAI_BASE_URL / OPENAI_API_KEY /
+ * DEFAULT_LLM_MODEL) AND the AgentMesh platform context (TENANT_ID,
+ * USER_ID, CONNECTION_STATE, WARP_URL, MODEL_MANAGER_URL, etc.) into
+ * the per-session container so the in-container provider + platform
+ * calls work end-to-end.
  */
 import { registerProviderContainerConfig } from './provider-container-registry.js';
 
-const PASSTHROUGH_KEYS = ['OPENAI_BASE_URL', 'OPENAI_API_KEY', 'DEFAULT_LLM_MODEL'] as const;
+const PROVIDER_KEYS = ['OPENAI_BASE_URL', 'OPENAI_API_KEY', 'DEFAULT_LLM_MODEL'] as const;
+const PLATFORM_KEYS = [
+  'TENANT_ID',
+  'USER_ID',
+  'CONNECTION_STATE',
+  'WARP_URL',
+  'MODEL_MANAGER_URL',
+  'TOOL_MANAGER_URL',
+  'METERING_USAGE_URL',
+] as const;
 
 registerProviderContainerConfig('openai-compat', (ctx) => {
   const env: Record<string, string> = {};
-  for (const key of PASSTHROUGH_KEYS) {
+  // Provider-specific: also accept canonical MAIN_MODEL_* as fallback so
+  // operators can use one set of env names regardless of provider.
+  const apiKey = ctx.hostEnv.OPENAI_API_KEY || ctx.hostEnv.MAIN_MODEL_API_KEY;
+  if (apiKey) env.OPENAI_API_KEY = apiKey;
+  const baseUrl = ctx.hostEnv.OPENAI_BASE_URL || ctx.hostEnv.MAIN_MODEL_BASE_URL;
+  if (baseUrl) env.OPENAI_BASE_URL = baseUrl;
+  for (const key of PROVIDER_KEYS) {
+    if (env[key] === undefined && ctx.hostEnv[key]) env[key] = ctx.hostEnv[key]!;
+  }
+  for (const key of PLATFORM_KEYS) {
     const v = ctx.hostEnv[key];
     if (v) env[key] = v;
   }
