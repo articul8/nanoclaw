@@ -29,6 +29,16 @@ export interface TenantContext {
 }
 
 /**
+ * True when the runtime is in incognito mode (CONNECTION_STATE=incognito).
+ * In incognito mode, platform calls are NOT made at all — callers should
+ * check this and skip the call rather than relying on platformFetch to
+ * throw. The throw is defense-in-depth.
+ */
+export function isIncognito(): boolean {
+  return process.env.CONNECTION_STATE === 'incognito';
+}
+
+/**
  * Read tenant context from process.env. Throws if TENANT_ID or USER_ID
  * are missing/empty — a pod that boots without them is misconfigured at
  * the K8s level and cannot serve sessions safely.
@@ -59,6 +69,12 @@ export function readTenantContext(): TenantContext {
  * `fetch` for those endpoints. Channel adapters use their own auth.
  */
 export async function platformFetch(url: string, options: PlatformFetchOptions = {}): Promise<Response> {
+  if (isIncognito()) {
+    throw new Error(
+      `[tenant-context] platformFetch refused: runtime is in INCOGNITO mode (CONNECTION_STATE=incognito). ` +
+        `No platform calls allowed. Callers should check isIncognito() and skip the call. URL: ${url}`,
+    );
+  }
   assertAllowed(url);
   const { tenantId, userId, missionToken: envToken } = readTenantContext();
   const { missionToken: callToken, headers: callerHeaders, ...rest } = options;

@@ -39,8 +39,15 @@ type EnvDict = Record<string, string>;
 /** Local-dev placeholder identity. Used in offline mode (no platform connectivity). */
 const LOCAL_TENANT_PREFIX = 'local-dev-tenant';
 
-/** Connection states recorded in .env / shown via status. */
-type ConnectionState = 'offline' | 'connected';
+/**
+ * Connection / privacy state recorded in .env and shown via status.
+ *   offline    — target connected, but auth pending (first-run default; can graduate via `connect`)
+ *   connected  — auth resolved; platform features enabled
+ *   incognito  — explicitly opted out of platform; runtime never calls Warp / MM /
+ *                metering. Inference still works via the direct provider, but no
+ *                episodes, audit, graph entities, or usage metering are written.
+ */
+type ConnectionState = 'offline' | 'connected' | 'incognito';
 
 /** Derive a deterministic local user id from the OS user when offline. */
 function localUserId(): string {
@@ -128,8 +135,41 @@ async function configure(): Promise<void> {
   // (e.g. from a prior `connect`) are preserved.
   const tenantId = existing.TENANT_ID || localTenantId();
   const userId = existing.USER_ID || localUserId();
-  const connectionState: ConnectionState =
-    (existing.CONNECTION_STATE as ConnectionState) || 'offline';
+  const priorState: ConnectionState = (existing.CONNECTION_STATE as ConnectionState) || 'offline';
+
+  // Privacy mode — user-facing decision, two long-term values:
+  //   connected  — wants platform features (memory, audit, metering, dashboard)
+  //   incognito  — opts out; runtime never calls platform endpoints
+  // The intermediate "offline" state is the implicit pending-state when
+  // target=connected but auth hasn't completed yet; that's surfaced by the
+  // `connect` flow rather than as a user-facing prompt option.
+  const targetMode = await select({
+    message: 'Privacy mode',
+    options: [
+      {
+        value: 'connected',
+        label: 'connected  (memory, audit, metering, dashboard — runs in OFFLINE pending until you `./a8-claw connect`)',
+        hint: 'recommended',
+      },
+      {
+        value: 'incognito',
+        label: 'incognito  (no platform calls ever — chat-only, no persistence, no telemetry)',
+      },
+    ],
+    initialValue: priorState === 'incognito' ? 'incognito' : 'connected',
+  });
+  if (isCancel(targetMode)) {
+    cancel('configuration cancelled');
+    process.exit(0);
+  }
+  // Map target → persisted state. If user picked connected, preserve a prior
+  // 'connected' (already auth'd); otherwise enter offline pending.
+  let connectionState: ConnectionState;
+  if (targetMode === 'incognito') {
+    connectionState = 'incognito';
+  } else {
+    connectionState = priorState === 'connected' ? 'connected' : 'offline';
+  }
 
   const route = await select({
     message: 'Main-model routing',
@@ -264,6 +304,19 @@ async function configure(): Promise<void> {
       ].join('\n'),
       'configured',
     );
+  } else if (connectionState === 'incognito') {
+    note(
+      [
+        `Running in ${kleur.magenta('INCOGNITO')} mode — chat is local-only.`,
+        '',
+        'No platform calls (Warp, Tool Manager, Model Manager metering) will be',
+        'made. No episodes, audit, graph entities, or usage data are recorded.',
+        'Inference goes direct to the configured provider only.',
+        '',
+        `To enable platform features later: ${kleur.cyan('./a8-claw configure')} → pick connected.`,
+      ].join('\n'),
+      'configured',
+    );
   }
   outro(`Wrote ${ENV_PATH}`);
 }
@@ -339,16 +392,29 @@ async function cmdStart(): Promise<void> {
   ensureBuild();
   ensureSetup();
 
-  const connState = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
+  // --incognito flag overrides the persisted CONNECTION_STATE for this
+  // invocation only (doesn't rewrite .env). Useful for one-off private chats.
+  const flagIncognito = process.argv.includes('--incognito');
+  let connState = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
+  if (flagIncognito) connState = 'incognito';
+  // Propagate so the runtime + auth layer can read it.
+  process.env.CONNECTION_STATE = connState;
+
   console.error('');
   console.error(`✓  a8-claw starting`);
-  if (connState === 'offline') {
-    console.error(`   ${kleur.yellow('OFFLINE')}  identity=${env.TENANT_ID} / ${env.USER_ID}  ${kleur.dim('(local placeholder)')}`);
+  if (connState === 'incognito') {
+    console.error(`   ${kleur.magenta('INCOGNITO')}  ${kleur.dim('chat-only; no platform calls; nothing recorded')}`);
+  } else if (connState === 'offline') {
+    console.error(
+      `   ${kleur.yellow('OFFLINE')}  identity=${env.TENANT_ID} / ${env.USER_ID}  ${kleur.dim('(local placeholder)')}`,
+    );
     console.error(`   ${kleur.dim('Platform features pending.  Run ./a8-claw connect to authenticate.')}`);
   } else {
     console.error(`   ${kleur.green('connected')}  ${env.TENANT_ID} / ${env.USER_ID}`);
   }
-  console.error(`   route=${env.MAIN_MODEL_ROUTE ?? 'direct'}  provider=${env.MAIN_MODEL_PROVIDER ?? 'anthropic'}  model=${env.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6'}`);
+  console.error(
+    `   route=${env.MAIN_MODEL_ROUTE ?? 'direct'}  provider=${env.MAIN_MODEL_PROVIDER ?? 'anthropic'}  model=${env.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6'}`,
+  );
   console.error(`   warp=${env.WARP_URL}`);
   console.error(`   model_manager=${env.MODEL_MANAGER_URL}`);
   console.error('');
@@ -370,6 +436,12 @@ async function cmdConnect(): Promise<void> {
   const env = readEnv();
   if (!env.WARP_URL) {
     console.error(`✗  WARP_URL not set; run ./a8-claw configure first.`);
+    process.exit(1);
+  }
+  const currentState = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
+  if (currentState === 'incognito') {
+    console.error(`✗  Currently in INCOGNITO mode — connect is disabled.`);
+    console.error(`   Switch to connected via:  ${kleur.cyan('./a8-claw configure')}  → pick connected.`);
     process.exit(1);
   }
   intro('a8-claw connect');
@@ -485,10 +557,16 @@ async function cmdStatus(): Promise<void> {
     const cs = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
     if (cs === 'connected') {
       ok(`connected — tenant=${env.TENANT_ID} user=${env.USER_ID}`);
+    } else if (cs === 'incognito') {
+      ok(`${kleur.magenta('INCOGNITO')} — chat-only; no platform calls; nothing recorded`);
     } else {
-      warn(`OFFLINE — using local placeholder identity (${env.TENANT_ID} / ${env.USER_ID}); run ./a8-claw connect to authenticate`);
+      warn(
+        `OFFLINE — using local placeholder identity (${env.TENANT_ID} / ${env.USER_ID}); run ./a8-claw connect to authenticate`,
+      );
     }
-    ok(`route=${env.MAIN_MODEL_ROUTE ?? 'direct'} provider=${env.MAIN_MODEL_PROVIDER ?? 'anthropic'} model=${env.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6'}`);
+    ok(
+      `route=${env.MAIN_MODEL_ROUTE ?? 'direct'} provider=${env.MAIN_MODEL_PROVIDER ?? 'anthropic'} model=${env.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6'}`,
+    );
   }
   if (fs.existsSync(path.join(ROOT, 'node_modules'))) ok('node_modules present');
   else warn('deps not installed (run ./a8-claw build)');
@@ -506,20 +584,25 @@ function printHelp(): void {
 
 Usage:
   a8-claw                  Start the host (auto-bootstrap + first-run configure)
+  a8-claw --incognito      Start in INCOGNITO mode for this run only (no platform calls)
   a8-claw chat MESSAGE     Send a chat message via local CLI socket
-  a8-claw configure        Interactive configuration of provider, key, model, URLs
+  a8-claw configure        Interactive configuration: provider, key, model, privacy mode
   a8-claw --configure      Same, as a flag
-  a8-claw connect          Authenticate with the AgentMesh platform; resolves
-                           real tenant + user identity (graduates offline → connected)
+  a8-claw connect          Authenticate with the AgentMesh platform; graduates
+                           offline → connected (refused in incognito mode)
   a8-claw setup            Run nanoclaw setup (DB init, container build)
   a8-claw build            Build TypeScript
   a8-claw status           Show health / connection state
   a8-claw -h | --help      Show this help
 
-First run: configure prompts only for things you actually decide (provider,
-API key, model). Tenant + user identity defaults to offline placeholders
-and is resolved from the platform via 'connect' once you have an AgentMesh
-PAT — runtime tags work as 'first-connect-pending' until then.
+Privacy modes (set during configure):
+  connected   memory, audit, metering, dashboard. Starts OFFLINE pending
+              first 'connect' to the platform.
+  incognito   no platform calls ever — chat-only, no persistence, no telemetry.
+
+First run: configure prompts only for user-facing decisions (provider, API key,
+model, privacy mode). Tenant + user identity is resolved by the platform; users
+never type those.
 `;
   console.log(help);
 }

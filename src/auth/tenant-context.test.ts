@@ -141,6 +141,20 @@ describe('platformFetch', () => {
     );
     expect(mock).not.toHaveBeenCalled();
   });
+
+  it('refuses ALL platform calls when CONNECTION_STATE=incognito', async () => {
+    process.env.CONNECTION_STATE = 'incognito';
+    try {
+      const mock = vi.fn().mockResolvedValue(new Response('ok'));
+      vi.stubGlobal('fetch', mock);
+      await expect(
+        platformFetch('http://aks-warp-service.aks-warp-apps.svc.cluster.local:8085/foo'),
+      ).rejects.toThrow(/INCOGNITO mode/);
+      expect(mock).not.toHaveBeenCalled();
+    } finally {
+      delete process.env.CONNECTION_STATE;
+    }
+  });
 });
 
 describe('platformPostJson', () => {
