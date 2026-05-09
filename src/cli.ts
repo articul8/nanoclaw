@@ -24,6 +24,15 @@ import { spawn, spawnSync } from 'child_process';
 import { cancel, intro, isCancel, note, outro, password, select, text } from '@clack/prompts';
 import kleur from 'kleur';
 
+import {
+  AFFIRMATION_TEXT,
+  affirmationFilePath,
+  isAffirmationCurrent,
+  readAffirmation,
+  revokeAffirmation,
+  runOnboarding,
+} from './onboarding.js';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 // __dirname is dist/ after build, src/ in dev (tsx). Walk up to repo root.
@@ -125,7 +134,25 @@ function loadIntoProcessEnv(env: EnvDict): void {
 
 // ─── interactive configure ──────────────────────────────────────────
 
+/**
+ * Block any platform-touching subcommand until the user has signed the
+ * current affirmation. First call shows the four onboarding screens +
+ * captures the typed name; subsequent calls are no-ops while the hash
+ * matches. Even --incognito requires the affirmation — the responsibility
+ * framing is about the user, not platform telemetry.
+ */
+async function ensureAffirmation(): Promise<void> {
+  if (isAffirmationCurrent()) return;
+  await runOnboarding();
+  if (!isAffirmationCurrent()) {
+    // User Ctrl-C'd the prompts. Bail.
+    console.error('\nAffirmation not signed — exiting.');
+    process.exit(1);
+  }
+}
+
 async function configure(): Promise<void> {
+  await ensureAffirmation();
   const existing = readEnv();
   intro('a8-claw configure');
 
@@ -148,7 +175,8 @@ async function configure(): Promise<void> {
     options: [
       {
         value: 'connected',
-        label: 'connected  (memory, audit, metering, dashboard — runs in OFFLINE pending until you `./a8-claw connect`)',
+        label:
+          'connected  (memory, audit, metering, dashboard — runs in OFFLINE pending until you `./a8-claw connect`)',
         hint: 'recommended',
       },
       {
@@ -375,6 +403,7 @@ function ensureSetup(): void {
 // ─── subcommands ────────────────────────────────────────────────────
 
 async function cmdStart(): Promise<void> {
+  await ensureAffirmation();
   if (!fs.existsSync(ENV_PATH)) {
     console.error('▶  No .env yet — running first-time configure');
     await configure();
@@ -433,6 +462,7 @@ async function cmdStart(): Promise<void> {
  * it surfaces the gap and stays offline.
  */
 async function cmdConnect(): Promise<void> {
+  await ensureAffirmation();
   const env = readEnv();
   if (!env.WARP_URL) {
     console.error(`✗  WARP_URL not set; run ./a8-claw configure first.`);
@@ -523,6 +553,7 @@ async function cmdChat(args: string[]): Promise<void> {
     console.error('Usage: a8-claw chat <message>');
     process.exit(1);
   }
+  await ensureAffirmation();
   const env = readEnv();
   loadIntoProcessEnv(env);
   process.exit(run('pnpm', ['chat', msg]));
@@ -538,6 +569,19 @@ async function cmdSetup(): Promise<void> {
 async function cmdBuild(): Promise<void> {
   ensureDeps();
   process.exit(run('pnpm', ['build']));
+}
+
+/**
+ * Revoke the persisted affirmation. Next start re-shows the four
+ * onboarding screens and re-prompts for a typed-name signature.
+ */
+function cmdRevokeAffirmation(): void {
+  const removed = revokeAffirmation();
+  if (removed) {
+    console.log(`${kleur.green('✓')}  Affirmation revoked. Next start will re-prompt onboarding.`);
+  } else {
+    console.log(`${kleur.yellow('⚠')}  No affirmation on file at ${affirmationFilePath()}.`);
+  }
 }
 
 async function cmdStatus(): Promise<void> {
@@ -568,6 +612,17 @@ async function cmdStatus(): Promise<void> {
       `route=${env.MAIN_MODEL_ROUTE ?? 'direct'} provider=${env.MAIN_MODEL_PROVIDER ?? 'anthropic'} model=${env.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6'}`,
     );
   }
+  // Affirmation status
+  const aff = readAffirmation();
+  if (aff) {
+    if (isAffirmationCurrent()) {
+      ok(`affirmation signed by ${aff.signed_by_typed_name} on ${aff.signed_at_utc.slice(0, 10)}`);
+    } else {
+      warn(`affirmation outdated (text changed) — next start re-prompts`);
+    }
+  } else {
+    warn(`affirmation not signed — first start runs onboarding`);
+  }
   if (fs.existsSync(path.join(ROOT, 'node_modules'))) ok('node_modules present');
   else warn('deps not installed (run ./a8-claw build)');
   if (fs.existsSync(path.join(ROOT, 'dist', 'index.js'))) ok('build present');
@@ -583,26 +638,27 @@ function printHelp(): void {
   const help = `a8-claw — AgentMesh conversational runtime launcher
 
 Usage:
-  a8-claw                  Start the host (auto-bootstrap + first-run configure)
-  a8-claw --incognito      Start in INCOGNITO mode for this run only (no platform calls)
-  a8-claw chat MESSAGE     Send a chat message via local CLI socket
-  a8-claw configure        Interactive configuration: provider, key, model, privacy mode
-  a8-claw --configure      Same, as a flag
-  a8-claw connect          Authenticate with the AgentMesh platform; graduates
-                           offline → connected (refused in incognito mode)
-  a8-claw setup            Run nanoclaw setup (DB init, container build)
-  a8-claw build            Build TypeScript
-  a8-claw status           Show health / connection state
-  a8-claw -h | --help      Show this help
+  a8-claw                       Start the host (first-run: onboarding → configure → start)
+  a8-claw --incognito           Start in INCOGNITO mode for this run only
+  a8-claw chat MESSAGE          Send a chat message via local CLI socket
+  a8-claw configure             Interactive configuration of provider, key, model, privacy
+  a8-claw --configure           Same, as a flag
+  a8-claw connect               Authenticate with the AgentMesh platform
+  a8-claw revoke-affirmation    Clear the signed affirmation; next start re-onboards
+  a8-claw setup                 Run nanoclaw setup (DB init, container build)
+  a8-claw build                 Build TypeScript
+  a8-claw status                Show health, connection state, affirmation status
+  a8-claw -h | --help           Show this help
 
 Privacy modes (set during configure):
   connected   memory, audit, metering, dashboard. Starts OFFLINE pending
               first 'connect' to the platform.
   incognito   no platform calls ever — chat-only, no persistence, no telemetry.
 
-First run: configure prompts only for user-facing decisions (provider, API key,
-model, privacy mode). Tenant + user identity is resolved by the platform; users
-never type those.
+First run: walks through four onboarding screens (welcome / when-to-use /
+security / responsibility) and asks you to sign a typed-name affirmation
+before any configure prompt. Recorded at ~/.a8/affirmations/a8-claw.json
+with the current text's sha256, so any future amendment re-prompts.
 `;
   console.log(help);
 }
@@ -622,6 +678,10 @@ async function main(): Promise<void> {
   }
   if (args[0] === 'connect') {
     await cmdConnect();
+    return;
+  }
+  if (args[0] === 'revoke-affirmation') {
+    cmdRevokeAffirmation();
     return;
   }
 
