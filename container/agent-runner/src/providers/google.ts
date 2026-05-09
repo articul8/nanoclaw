@@ -1,43 +1,52 @@
 /**
- * Google Gemini provider — streaming v1 adapter for the AgentMesh fork.
+ * Google Gemini provider — streaming + function-calling adapter.
  *
- * Targets the Generative Language API (Gemini). Env:
+ * Targets the Generative Language API. Env:
  *   - GOOGLE_GENAI_BASE_URL  (default https://generativelanguage.googleapis.com)
- *   - GOOGLE_API_KEY         (required; passed via x-goog-api-key header)
+ *   - GOOGLE_API_KEY         (x-goog-api-key header)
  *   - DEFAULT_LLM_MODEL      (e.g. gemini-2.5-flash, gemini-2.0-flash-exp)
  *
- * Uses SSE streaming via the `:streamGenerateContent?alt=sse` endpoint —
- * yields an `activity` event per delta chunk for liveness, accumulates
- * text, emits a single `result` event when the stream closes. Errors
- * and prompt-blocks map to `error` events.
+ * Capabilities:
+ *   - SSE streaming (`:streamGenerateContent?alt=sse`) with per-chunk
+ *     activity events.
+ *   - Function calling — discovers tools via the MCP-tool bridge,
+ *     translates them to Gemini's `tools: [{functionDeclarations: [...]}]`
+ *     spec, drives the multi-turn tool-call loop. Tool results go back
+ *     as `{role: 'user', parts: [{functionResponse: {...}}]}` content.
  *
- * v1 limitations (matches the openai-compat provider):
- *   - No tool use / function calling
- *   - No MCP (server registrations are silently ignored)
+ * v1 limitations (matches openai-compat):
  *   - No transcript archiving
- *
- * Streaming is in; the rest is a follow-up phase.
+ *   - Sequential tool dispatch
  */
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { BridgedTool, ToolBridge } from './mcp-tool-bridge.js';
+import { createMcpToolBridge } from './mcp-tool-bridge.js';
+
+interface GeminiPart {
+  text?: string;
+  functionCall?: { name: string; args: Record<string, unknown> };
+  functionResponse?: { name: string; response: Record<string, unknown> };
+}
 
 interface GeminiContent {
   /** Gemini uses 'user' and 'model' (not 'assistant'). */
   role: 'user' | 'model';
-  parts: { text: string }[];
+  parts: GeminiPart[];
 }
 
 interface GenerateContentChunk {
-  candidates?: { content?: { parts?: { text?: string }[] }; finishReason?: string }[];
+  candidates?: { content?: { parts?: GeminiPart[] }; finishReason?: string }[];
   error?: { message?: string; status?: string };
   promptFeedback?: { blockReason?: string };
 }
+
+const MAX_TOOL_LOOP_ITERATIONS = 10;
 
 function log(msg: string): void {
   console.error(`[google-provider] ${msg}`);
 }
 
-/** Generic SSE parser. See openai.ts for the equivalent — kept here to avoid a shared util. */
 async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder('utf-8');
@@ -64,6 +73,22 @@ async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncGenerator<strin
   }
 }
 
+/** Translate a BridgedTool into a Gemini functionDeclaration. */
+function bridgedToGemini(t: BridgedTool): { name: string; description: string; parameters: Record<string, unknown> } {
+  return {
+    name: t.qualifiedName,
+    description: t.description,
+    parameters: t.inputSchema,
+  };
+}
+
+interface StreamOutcome {
+  text: string;
+  /** Function calls the LLM wants dispatched. */
+  toolCalls: Array<{ name: string; args: Record<string, unknown> }>;
+  finishReason: string | null;
+}
+
 class GoogleQuery implements AgentQuery {
   private readonly _events: AsyncIterable<ProviderEvent>;
   private readonly userQueue: string[] = [];
@@ -72,30 +97,34 @@ class GoogleQuery implements AgentQuery {
   private aborted = false;
   private currentAbort: AbortController | null = null;
 
-  constructor(input: QueryInput, baseUrl: string, apiKey: string, model: string) {
+  constructor(
+    input: QueryInput,
+    baseUrl: string,
+    apiKey: string,
+    model: string,
+    mcpServers: Record<string, McpServerConfig>,
+  ) {
     const contents: GeminiContent[] = [];
     const systemInstruction = input.systemContext?.instructions
       ? { parts: [{ text: input.systemContext.instructions }] }
       : undefined;
     this.userQueue.push(input.prompt);
-
     const self = this;
 
-    async function* streamGenerate(): AsyncGenerator<ProviderEvent> {
+    async function* streamOne(toolDecls: { name: string; description: string; parameters: Record<string, unknown> }[]): AsyncGenerator<ProviderEvent, StreamOutcome> {
       const ac = new AbortController();
       self.currentAbort = ac;
+
       const url = `${baseUrl}/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`;
       const body: Record<string, unknown> = { contents };
       if (systemInstruction) body.systemInstruction = systemInstruction;
+      if (toolDecls.length > 0) body.tools = [{ functionDeclarations: toolDecls }];
 
       let resp: Response;
       try {
         resp = await fetch(url, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': apiKey,
-          },
+          headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
           body: JSON.stringify(body),
           signal: ac.signal,
         });
@@ -103,7 +132,7 @@ class GoogleQuery implements AgentQuery {
         const msg = err instanceof Error ? err.message : String(err);
         yield { type: 'error', message: msg, retryable: true };
         self.currentAbort = null;
-        return;
+        return { text: '', toolCalls: [], finishReason: null };
       }
 
       if (!resp.ok) {
@@ -115,20 +144,23 @@ class GoogleQuery implements AgentQuery {
           classification: resp.status === 401 || resp.status === 403 ? 'auth' : `http-${resp.status}`,
         };
         self.currentAbort = null;
-        return;
+        return { text: '', toolCalls: [], finishReason: null };
       }
       if (!resp.body) {
         yield { type: 'error', message: 'Gemini: no response body', retryable: true };
         self.currentAbort = null;
-        return;
+        return { text: '', toolCalls: [], finishReason: null };
       }
 
       let accumulated = '';
+      const toolCalls: Array<{ name: string; args: Record<string, unknown> }> = [];
+      let finishReason: string | null = null;
+
       try {
         for await (const data of parseSSE(resp.body)) {
           if (self.aborted) {
             ac.abort();
-            return;
+            return { text: accumulated, toolCalls: [], finishReason: 'aborted' };
           }
           let chunk: GenerateContentChunk;
           try {
@@ -139,7 +171,7 @@ class GoogleQuery implements AgentQuery {
           if (chunk.error) {
             yield { type: 'error', message: chunk.error.message ?? 'stream error', retryable: false };
             self.currentAbort = null;
-            return;
+            return { text: accumulated, toolCalls: [], finishReason: 'error' };
           }
           if (chunk.promptFeedback?.blockReason) {
             yield {
@@ -149,43 +181,107 @@ class GoogleQuery implements AgentQuery {
               classification: 'safety-block',
             };
             self.currentAbort = null;
-            return;
+            return { text: accumulated, toolCalls: [], finishReason: 'safety-block' };
           }
-          const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+          const cand = chunk.candidates?.[0];
+          const parts = cand?.content?.parts ?? [];
           for (const p of parts) {
             if (p.text) {
               accumulated += p.text;
               yield { type: 'activity' };
             }
+            if (p.functionCall) {
+              toolCalls.push({ name: p.functionCall.name, args: p.functionCall.args ?? {} });
+              yield { type: 'activity' };
+            }
           }
+          if (cand?.finishReason) finishReason = cand.finishReason;
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         yield { type: 'error', message: `stream interrupted: ${msg}`, retryable: true };
         self.currentAbort = null;
-        return;
+        return { text: accumulated, toolCalls: [], finishReason: 'error' };
       }
 
-      contents.push({ role: 'model', parts: [{ text: accumulated }] });
-      yield { type: 'result', text: accumulated || null };
       self.currentAbort = null;
+      return { text: accumulated, toolCalls, finishReason };
+    }
+
+    async function* runTurn(bridge: ToolBridge | null): AsyncGenerator<ProviderEvent> {
+      const toolDecls = bridge ? bridge.tools.map(bridgedToGemini) : [];
+
+      for (let iter = 0; iter < MAX_TOOL_LOOP_ITERATIONS; iter++) {
+        yield { type: 'progress', message: `${model} → streaming…${iter > 0 ? ` (post-tool turn ${iter})` : ''}` };
+        const outcome = yield* streamOne(toolDecls);
+        if (self.aborted) return;
+
+        // Record the model turn — text and/or functionCall parts are both valid.
+        const modelParts: GeminiPart[] = [];
+        if (outcome.text) modelParts.push({ text: outcome.text });
+        for (const tc of outcome.toolCalls) {
+          modelParts.push({ functionCall: { name: tc.name, args: tc.args } });
+        }
+        if (modelParts.length > 0) {
+          contents.push({ role: 'model', parts: modelParts });
+        }
+
+        if (outcome.toolCalls.length === 0) {
+          yield { type: 'result', text: outcome.text || null };
+          return;
+        }
+
+        // Dispatch each, append the result as a functionResponse user turn.
+        const responseParts: GeminiPart[] = [];
+        for (const tc of outcome.toolCalls) {
+          if (self.aborted) return;
+          let resultObj: Record<string, unknown>;
+          try {
+            const text = await bridge!.dispatch(tc.name, tc.args);
+            resultObj = { result: text };
+            yield { type: 'progress', message: `tool ${tc.name} → ok` };
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            log(`tool ${tc.name} dispatch failed: ${msg}`);
+            resultObj = { error: msg };
+            yield { type: 'progress', message: `tool ${tc.name} → error` };
+          }
+          responseParts.push({ functionResponse: { name: tc.name, response: resultObj } });
+        }
+        contents.push({ role: 'user', parts: responseParts });
+        // Loop: re-stream with the function results as new context.
+      }
+      yield { type: 'error', message: `tool-call loop exceeded ${MAX_TOOL_LOOP_ITERATIONS} iterations`, retryable: false };
     }
 
     this._events = (async function* generate(): AsyncGenerator<ProviderEvent> {
       yield { type: 'init', continuation: '' };
 
-      while (true) {
-        while (self.userQueue.length > 0) {
-          if (self.aborted) return;
-          const userMsg = self.userQueue.shift()!;
-          contents.push({ role: 'user', parts: [{ text: userMsg }] });
-          yield { type: 'progress', message: `${model} → streaming…` };
-          for await (const ev of streamGenerate()) yield ev;
+      let bridge: ToolBridge | null = null;
+      if (Object.keys(mcpServers).length > 0) {
+        try {
+          bridge = await createMcpToolBridge(mcpServers);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`mcp bridge init failed: ${msg} — proceeding without tools`);
         }
-        if (self.done) return;
-        await new Promise<void>((r) => {
-          self.waiter = r;
-        });
+      }
+
+      try {
+        while (true) {
+          while (self.userQueue.length > 0) {
+            if (self.aborted) return;
+            const userMsg = self.userQueue.shift()!;
+            contents.push({ role: 'user', parts: [{ text: userMsg }] });
+            for await (const ev of runTurn(bridge)) yield ev;
+          }
+          if (self.done) return;
+          await new Promise<void>((r) => {
+            self.waiter = r;
+          });
+        }
+      } finally {
+        if (bridge) await bridge.close().catch(() => {});
       }
     })();
   }
@@ -220,23 +316,22 @@ class GoogleQuery implements AgentQuery {
 class GoogleProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
   private readonly env: Record<string, string | undefined>;
+  private readonly mcpServers: Record<string, McpServerConfig>;
 
   constructor(opts: ProviderOptions = {}) {
     this.env = opts.env ?? (process.env as Record<string, string | undefined>);
+    this.mcpServers = opts.mcpServers ?? {};
   }
 
   query(input: QueryInput): AgentQuery {
-    const baseUrl = (this.env.GOOGLE_GENAI_BASE_URL ?? 'https://generativelanguage.googleapis.com').replace(
-      /\/+$/,
-      '',
-    );
+    const baseUrl = (this.env.GOOGLE_GENAI_BASE_URL ?? 'https://generativelanguage.googleapis.com').replace(/\/+$/, '');
     const apiKey = this.env.GOOGLE_API_KEY;
     const model = this.env.DEFAULT_LLM_MODEL ?? 'gemini-2.5-flash';
     if (!apiKey) {
       throw new Error('[google-provider] GOOGLE_API_KEY env required');
     }
-    log(`provider ready (model=${model}, baseUrl=${baseUrl})`);
-    return new GoogleQuery(input, baseUrl, apiKey, model);
+    log(`provider ready (model=${model}, baseUrl=${baseUrl}, mcpServers=${Object.keys(this.mcpServers).length})`);
+    return new GoogleQuery(input, baseUrl, apiKey, model, this.mcpServers);
   }
 
   isSessionInvalid(_err: unknown): boolean {
