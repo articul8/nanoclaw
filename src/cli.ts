@@ -30,10 +30,8 @@ const ROOT = path.resolve(__dirname, '..');
 const ENV_PATH = path.join(ROOT, '.env');
 const ENV_EXAMPLE = path.join(ROOT, '.env.example');
 
-const STAGING_WARP_URL =
-  'http://a7467be8f89754f7b80eff560d5e20d0-00b1550d014a24f4.elb.us-west-2.amazonaws.com:8085';
-const STAGING_MM_URL =
-  'http://a667db70e77234d45ad009f6ad39ec73-1362220438.us-west-2.elb.amazonaws.com:8000';
+const STAGING_WARP_URL = 'http://a7467be8f89754f7b80eff560d5e20d0-00b1550d014a24f4.elb.us-west-2.amazonaws.com:8085';
+const STAGING_MM_URL = 'http://a667db70e77234d45ad009f6ad39ec73-1362220438.us-west-2.elb.amazonaws.com:8000';
 
 type EnvDict = Record<string, string>;
 
@@ -48,10 +46,7 @@ function parseEnv(content: string): EnvDict {
     if (eq < 0) continue;
     const key = trimmed.slice(0, eq).trim();
     let val = trimmed.slice(eq + 1).trim();
-    if (
-      (val.startsWith('"') && val.endsWith('"')) ||
-      (val.startsWith("'") && val.endsWith("'"))
-    ) {
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
       val = val.slice(1, -1);
     }
     if (val) env[key] = val;
@@ -106,7 +101,10 @@ async function configure(): Promise<void> {
     initialValue: existing.TENANT_ID,
     validate: (v) => (v && v.length > 0 ? undefined : 'Required (tenant-only scoping is a security breach)'),
   });
-  if (isCancel(tenantId)) { cancel('configuration cancelled'); process.exit(0); }
+  if (isCancel(tenantId)) {
+    cancel('configuration cancelled');
+    process.exit(0);
+  }
 
   const userId = await text({
     message: 'USER_ID',
@@ -114,33 +112,82 @@ async function configure(): Promise<void> {
     initialValue: existing.USER_ID,
     validate: (v) => (v && v.length > 0 ? undefined : 'Required'),
   });
-  if (isCancel(userId)) { cancel('configuration cancelled'); process.exit(0); }
+  if (isCancel(userId)) {
+    cancel('configuration cancelled');
+    process.exit(0);
+  }
 
   const route = await select({
     message: 'Main-model routing',
     options: [
-      { value: 'direct', label: 'direct  (default — lower latency, runtime self-reports metering)', hint: 'recommended' },
+      {
+        value: 'direct',
+        label: 'direct  (default — lower latency, runtime self-reports metering)',
+        hint: 'recommended',
+      },
       { value: 'model_manager', label: 'model_manager  (route via Model Manager gateway)' },
     ],
     initialValue: existing.MAIN_MODEL_ROUTE ?? 'direct',
   });
-  if (isCancel(route)) { cancel('configuration cancelled'); process.exit(0); }
+  if (isCancel(route)) {
+    cancel('configuration cancelled');
+    process.exit(0);
+  }
+
+  const provider = await select({
+    message: 'Main-model provider',
+    options: [
+      { value: 'anthropic', label: 'Anthropic  (Claude — claude-sonnet-4-6, claude-opus-4-7, …)' },
+      { value: 'google', label: 'Google Gemini' },
+      { value: 'openai-compat', label: 'OpenAI-compatible  (OpenAI, Together, Fireworks, Groq, vLLM, Ollama, …)' },
+    ],
+    initialValue: existing.MAIN_MODEL_PROVIDER ?? 'anthropic',
+  });
+  if (isCancel(provider)) {
+    cancel('configuration cancelled');
+    process.exit(0);
+  }
+
+  const PROVIDER_DEFAULTS = {
+    anthropic: { url: 'https://api.anthropic.com', model: 'claude-sonnet-4-6', keyHint: 'Anthropic API key (sk-ant-...)' },
+    google: { url: 'https://generativelanguage.googleapis.com', model: 'gemini-2.5-flash', keyHint: 'Google API key' },
+    'openai-compat': { url: 'https://api.openai.com', model: 'gpt-4o', keyHint: 'API key (provider-specific format)' },
+  } as const;
+  const defaults = PROVIDER_DEFAULTS[provider as keyof typeof PROVIDER_DEFAULTS];
+
+  // For openai-compat we always ask the URL (custom self-hosted / Together / Fireworks etc.).
+  // For anthropic / google we prefill the default but let the operator override (proxy / custom endpoint).
+  const baseUrl = await text({
+    message: 'Provider base URL',
+    placeholder: defaults.url,
+    initialValue: existing.MAIN_MODEL_BASE_URL ?? defaults.url,
+  });
+  if (isCancel(baseUrl)) {
+    cancel('configuration cancelled');
+    process.exit(0);
+  }
 
   let apiKey: string | undefined;
   if (route === 'direct') {
     const k = await password({
-      message: 'ANTHROPIC_API_KEY (your own Anthropic key for local dev)',
+      message: `MAIN_MODEL_API_KEY — ${defaults.keyHint}`,
       validate: (v) => (v && v.length > 0 ? undefined : 'Required when MAIN_MODEL_ROUTE=direct'),
     });
-    if (isCancel(k)) { cancel('configuration cancelled'); process.exit(0); }
+    if (isCancel(k)) {
+      cancel('configuration cancelled');
+      process.exit(0);
+    }
     apiKey = k;
   }
 
   const model = await text({
     message: 'Default chat model',
-    initialValue: existing.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6',
+    initialValue: existing.DEFAULT_LLM_MODEL ?? defaults.model,
   });
-  if (isCancel(model)) { cancel('configuration cancelled'); process.exit(0); }
+  if (isCancel(model)) {
+    cancel('configuration cancelled');
+    process.exit(0);
+  }
 
   const useStaging = await select({
     message: 'AgentMesh platform URLs',
@@ -150,16 +197,25 @@ async function configure(): Promise<void> {
     ],
     initialValue: 'staging',
   });
-  if (isCancel(useStaging)) { cancel('configuration cancelled'); process.exit(0); }
+  if (isCancel(useStaging)) {
+    cancel('configuration cancelled');
+    process.exit(0);
+  }
 
   let warpUrl = STAGING_WARP_URL;
   let mmUrl = STAGING_MM_URL;
   if (useStaging === 'custom') {
     const w = await text({ message: 'WARP_URL', initialValue: existing.WARP_URL ?? STAGING_WARP_URL });
-    if (isCancel(w)) { cancel('configuration cancelled'); process.exit(0); }
+    if (isCancel(w)) {
+      cancel('configuration cancelled');
+      process.exit(0);
+    }
     warpUrl = w;
     const m = await text({ message: 'MODEL_MANAGER_URL', initialValue: existing.MODEL_MANAGER_URL ?? STAGING_MM_URL });
-    if (isCancel(m)) { cancel('configuration cancelled'); process.exit(0); }
+    if (isCancel(m)) {
+      cancel('configuration cancelled');
+      process.exit(0);
+    }
     mmUrl = m;
   }
 
@@ -167,11 +223,13 @@ async function configure(): Promise<void> {
     TENANT_ID: tenantId,
     USER_ID: userId,
     MAIN_MODEL_ROUTE: route,
+    MAIN_MODEL_PROVIDER: provider,
+    MAIN_MODEL_BASE_URL: baseUrl,
     DEFAULT_LLM_MODEL: model,
     WARP_URL: warpUrl,
     MODEL_MANAGER_URL: mmUrl,
   };
-  if (apiKey) updates.ANTHROPIC_API_KEY = apiKey;
+  if (apiKey) updates.MAIN_MODEL_API_KEY = apiKey;
 
   writeEnv(updates);
   outro(`Wrote ${ENV_PATH}`);
@@ -185,8 +243,12 @@ function validateEnv(env: EnvDict): string[] {
     if (!env[k]) errors.push(`Missing required: ${k}`);
   }
   const route = env.MAIN_MODEL_ROUTE ?? 'direct';
-  if (route === 'direct' && !env.ANTHROPIC_API_KEY) {
-    errors.push('MAIN_MODEL_ROUTE=direct requires ANTHROPIC_API_KEY');
+  if (route === 'direct') {
+    // Canonical name first; legacy ANTHROPIC_API_KEY honored as fallback
+    // to keep older .env files working.
+    if (!env.MAIN_MODEL_API_KEY && !env.ANTHROPIC_API_KEY) {
+      errors.push('MAIN_MODEL_ROUTE=direct requires MAIN_MODEL_API_KEY (or legacy ANTHROPIC_API_KEY)');
+    }
   }
   return errors;
 }
@@ -281,8 +343,8 @@ async function cmdBuild(): Promise<void> {
 }
 
 async function cmdStatus(): Promise<void> {
-  const ok = (msg: string): void => console.log(`${kleur.green("✓")}  ${msg}`);
-  const warn = (msg: string): void => console.log(`${kleur.yellow("⚠")}  ${msg}`);
+  const ok = (msg: string): void => console.log(`${kleur.green('✓')}  ${msg}`);
+  const warn = (msg: string): void => console.log(`${kleur.yellow('⚠')}  ${msg}`);
 
   if (!fs.existsSync(ENV_PATH)) {
     warn('.env missing — run ./a8-claw to bootstrap');
