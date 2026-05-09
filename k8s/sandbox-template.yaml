@@ -73,16 +73,44 @@ spec:
                   key: rabbitmq-url
 
             # ── Default chat model (resolved at session spawn) ─────
-            # The model NAME comes from configmap; the runtime POSTs to
-            # Model Manager /resolve at session spawn to get an endpoint
-            # UUID, then sets ANTHROPIC_BASE_URL = MODEL_MANAGER_URL/run/{uuid}
-            # for the SDK. Hardcoded UUIDs are forbidden (they differ per
-            # env). See src/integration/model-manager-base-url.ts (Phase 4).
+            # The model NAME comes from configmap; the runtime resolves
+            # ANTHROPIC_BASE_URL based on MAIN_MODEL_ROUTE (see below).
+            # Hardcoded UUIDs are forbidden (they differ per env).
             - name: DEFAULT_LLM_MODEL
               valueFrom:
                 configMapKeyRef:
                   name: a8-claw-config
                   key: default-llm-model
+
+            # ── Main-model routing (contract v1.1 §7.1) ────────────
+            # "direct" (default for a8-claw) → ANTHROPIC_BASE_URL =
+            #   https://api.anthropic.com; ANTHROPIC_API_KEY required;
+            #   runtime self-reports metering after each call.
+            # "model_manager" → ANTHROPIC_BASE_URL =
+            #   ${MODEL_MANAGER_URL}/run/${uuid} resolved at session spawn;
+            #   no API key needed; Model Manager auto-meters.
+            # All OTHER model calls route through Model Manager regardless.
+            - name: MAIN_MODEL_ROUTE
+              valueFrom:
+                configMapKeyRef:
+                  name: a8-claw-config
+                  key: main-model-route
+
+            # ── Main-model API key (only used when MAIN_MODEL_ROUTE=direct) ─
+            # In production, this key is resolved at session spawn from the
+            # platform credential service / vault (per-tenant + per-user BYOK).
+            # The K8s Secret slot below is the BOOTSTRAP / single-tenant fallback —
+            # operator populates it per tenant deploy until vault integration
+            # ships (post-v1). When MAIN_MODEL_ROUTE=model_manager this env is
+            # ignored. The Secret allows empty values, so an unpopulated key is
+            # not a pod-start failure — the runtime fails clearly at session
+            # spawn if direct mode is set without a resolvable key.
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: a8-claw-secrets
+                  key: anthropic-api-key
+                  optional: true
 
             # ── nanoclaw runtime config ────────────────────────────
             - name: NANOCLAW_PORT
