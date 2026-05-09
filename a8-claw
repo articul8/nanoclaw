@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# a8-claw — minimal Node-22 bootstrap, then exec the TS CLI.
+#
+# Everything (env, configure, dispatch, status) is in src/cli.ts. This
+# wrapper exists only because bringing Node 22 into PATH is a pre-Node
+# step (tsx itself needs Node).
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+# Prefer Homebrew node@22 (keg-only on macOS) without polluting the
+# user's shell. Falls back to whatever `node` is on PATH if it's v22.
+if [[ -d /opt/homebrew/opt/node@22/bin ]]; then
+  export PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+fi
+
+NODE_V="$(node -v 2>/dev/null || true)"
+if [[ "$NODE_V" != v22.* ]]; then
+  echo "✗  Need Node 22 (got '$NODE_V'). Install: brew install node@22" >&2
+  exit 1
+fi
+
+# pnpm install is required before tsx is available.
+if [[ ! -d node_modules ]]; then
+  echo "▶  Installing dependencies (first time)..." >&2
+  pnpm install >&2
+fi
+
+exec pnpm exec tsx src/cli.ts "$@"
