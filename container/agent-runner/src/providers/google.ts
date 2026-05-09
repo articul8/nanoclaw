@@ -6,22 +6,24 @@
  *   - GOOGLE_API_KEY         (x-goog-api-key header)
  *   - DEFAULT_LLM_MODEL      (e.g. gemini-2.5-flash, gemini-2.0-flash-exp)
  *
- * Capabilities:
+ * Capabilities (full parity with the Claude provider for chat + tools):
  *   - SSE streaming (`:streamGenerateContent?alt=sse`) with per-chunk
  *     activity events.
  *   - Function calling — discovers tools via the MCP-tool bridge,
  *     translates them to Gemini's `tools: [{functionDeclarations: [...]}]`
  *     spec, drives the multi-turn tool-call loop. Tool results go back
  *     as `{role: 'user', parts: [{functionResponse: {...}}]}` content.
- *
- * v1 limitations (matches openai-compat):
- *   - No transcript archiving
- *   - Sequential tool dispatch
+ *   - Parallel tool dispatch via Promise.all; functionResponse parts
+ *     batched into a single user turn.
+ *   - Conversation transcript archived after every turn to
+ *     /workspace/agent/conversations/<date>-<slug>.md.
  */
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import type { BridgedTool, ToolBridge } from './mcp-tool-bridge.js';
 import { createMcpToolBridge } from './mcp-tool-bridge.js';
+import type { FlatMessage } from './transcript-archive.js';
+import { TranscriptArchiver } from './transcript-archive.js';
 
 interface GeminiPart {
   text?: string;
@@ -103,13 +105,30 @@ class GoogleQuery implements AgentQuery {
     apiKey: string,
     model: string,
     mcpServers: Record<string, McpServerConfig>,
+    assistantName: string | undefined,
   ) {
     const contents: GeminiContent[] = [];
     const systemInstruction = input.systemContext?.instructions
       ? { parts: [{ text: input.systemContext.instructions }] }
       : undefined;
     this.userQueue.push(input.prompt);
+    const archiver = new TranscriptArchiver({ initialUserMessage: input.prompt, assistantName });
     const self = this;
+
+    /** Convert Gemini contents into the flat archive format. */
+    function flatten(): FlatMessage[] {
+      const out: FlatMessage[] = [];
+      for (const c of contents) {
+        const text = c.parts
+          .map((p) => p.text ?? '')
+          .filter(Boolean)
+          .join('');
+        if (!text) continue; // skip turns that are pure functionCall / functionResponse
+        if (c.role === 'user') out.push({ role: 'user', content: text });
+        else if (c.role === 'model') out.push({ role: 'assistant', content: text });
+      }
+      return out;
+    }
 
     async function* streamOne(toolDecls: { name: string; description: string; parameters: Record<string, unknown> }[]): AsyncGenerator<ProviderEvent, StreamOutcome> {
       const ac = new AbortController();
@@ -227,25 +246,33 @@ class GoogleQuery implements AgentQuery {
         }
 
         if (outcome.toolCalls.length === 0) {
+          // Terminal turn — archive the conversation.
+          archiver.write(flatten());
           yield { type: 'result', text: outcome.text || null };
           return;
         }
 
-        // Dispatch each, append the result as a functionResponse user turn.
+        // Dispatch all tool calls in parallel via Promise.all; emit
+        // progress events in original order after they complete; append
+        // a single user turn carrying all functionResponse parts.
+        const dispatched = await Promise.all(
+          outcome.toolCalls.map(async (tc) => {
+            if (self.aborted) {
+              return { tc, resultObj: { error: 'aborted' } as Record<string, unknown>, errored: true };
+            }
+            try {
+              const text = await bridge!.dispatch(tc.name, tc.args);
+              return { tc, resultObj: { result: text } as Record<string, unknown>, errored: false };
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              log(`tool ${tc.name} dispatch failed: ${msg}`);
+              return { tc, resultObj: { error: msg } as Record<string, unknown>, errored: true };
+            }
+          }),
+        );
         const responseParts: GeminiPart[] = [];
-        for (const tc of outcome.toolCalls) {
-          if (self.aborted) return;
-          let resultObj: Record<string, unknown>;
-          try {
-            const text = await bridge!.dispatch(tc.name, tc.args);
-            resultObj = { result: text };
-            yield { type: 'progress', message: `tool ${tc.name} → ok` };
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log(`tool ${tc.name} dispatch failed: ${msg}`);
-            resultObj = { error: msg };
-            yield { type: 'progress', message: `tool ${tc.name} → error` };
-          }
+        for (const { tc, resultObj, errored } of dispatched) {
+          yield { type: 'progress', message: `tool ${tc.name} → ${errored ? 'error' : 'ok'}` };
           responseParts.push({ functionResponse: { name: tc.name, response: resultObj } });
         }
         contents.push({ role: 'user', parts: responseParts });
@@ -317,10 +344,12 @@ class GoogleProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
   private readonly env: Record<string, string | undefined>;
   private readonly mcpServers: Record<string, McpServerConfig>;
+  private readonly assistantName: string | undefined;
 
   constructor(opts: ProviderOptions = {}) {
     this.env = opts.env ?? (process.env as Record<string, string | undefined>);
     this.mcpServers = opts.mcpServers ?? {};
+    this.assistantName = opts.assistantName;
   }
 
   query(input: QueryInput): AgentQuery {
@@ -331,7 +360,7 @@ class GoogleProvider implements AgentProvider {
       throw new Error('[google-provider] GOOGLE_API_KEY env required');
     }
     log(`provider ready (model=${model}, baseUrl=${baseUrl}, mcpServers=${Object.keys(this.mcpServers).length})`);
-    return new GoogleQuery(input, baseUrl, apiKey, model, this.mcpServers);
+    return new GoogleQuery(input, baseUrl, apiKey, model, this.mcpServers, this.assistantName);
   }
 
   isSessionInvalid(_err: unknown): boolean {

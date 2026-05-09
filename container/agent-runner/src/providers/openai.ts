@@ -8,25 +8,27 @@
  *   - OPENAI_API_KEY   (Bearer auth)
  *   - DEFAULT_LLM_MODEL
  *
- * Capabilities:
+ * Capabilities (full parity with the Claude provider for chat + tools):
  *   - SSE streaming with per-chunk activity events for liveness
  *   - Function calling — discovers tools via the MCP-tool bridge,
  *     translates them to OpenAI's `tools: [{type: "function", ...}]` spec,
  *     drives the multi-turn tool-call loop (LLM → tool_calls → dispatch
  *     via MCP → inject as tool messages → re-stream → repeat until the
  *     LLM stops calling tools).
- *   - Multi-call dispatch: when a single response contains multiple
- *     parallel tool_calls, all are dispatched (sequentially for now);
- *     each result becomes a separate `tool` message.
- *
- * v1 limitations:
- *   - No transcript archiving (Claude provider has it; we don't)
- *   - Sequential tool dispatch (parallel could come later)
+ *   - Parallel tool dispatch — multiple tool_calls in one response are
+ *     dispatched concurrently via Promise.all; progress events emitted
+ *     in tool_call order after all complete.
+ *   - Conversation transcript archived after every turn to
+ *     /workspace/agent/conversations/<date>-<slug>.md (overwritten,
+ *     not appended) so resume + cross-session memory works the same
+ *     way it does for the Claude provider.
  */
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import type { BridgedTool, ToolBridge } from './mcp-tool-bridge.js';
 import { createMcpToolBridge } from './mcp-tool-bridge.js';
+import type { FlatMessage } from './transcript-archive.js';
+import { TranscriptArchiver } from './transcript-archive.js';
 
 interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -125,13 +127,29 @@ class OpenAIQuery implements AgentQuery {
     apiKey: string,
     model: string,
     mcpServers: Record<string, McpServerConfig>,
+    assistantName: string | undefined,
   ) {
     const messages: ChatMessage[] = [];
     if (input.systemContext?.instructions) {
       messages.push({ role: 'system', content: input.systemContext.instructions });
     }
     this.userQueue.push(input.prompt);
+    const archiver = new TranscriptArchiver({ initialUserMessage: input.prompt, assistantName });
     const self = this;
+
+    /** Convert the OpenAI message array into the flat archive format. */
+    function flatten(): FlatMessage[] {
+      const out: FlatMessage[] = [];
+      for (const m of messages) {
+        if (m.role === 'user' && typeof m.content === 'string' && m.content) {
+          out.push({ role: 'user', content: m.content });
+        } else if (m.role === 'assistant' && typeof m.content === 'string' && m.content) {
+          out.push({ role: 'assistant', content: m.content });
+        }
+        // Skip 'system' (no value in archive) and 'tool' (could be added later if useful).
+      }
+      return out;
+    }
 
     /** One streaming completion call. Returns accumulated text + any tool_calls. */
     async function* streamOne(tools: { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }[]): AsyncGenerator<ProviderEvent, StreamOutcome> {
@@ -252,25 +270,33 @@ class OpenAIQuery implements AgentQuery {
         }
 
         if (outcome.toolCalls.length === 0) {
-          // No tools requested — terminal turn.
+          // No tools requested — terminal turn. Archive the conversation.
+          archiver.write(flatten());
           yield { type: 'result', text: outcome.text || null };
           return;
         }
 
-        // Dispatch each tool call, append the result as a `tool` message.
-        for (const tc of outcome.toolCalls) {
-          if (self.aborted) return;
-          let resultText: string;
-          try {
-            const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {};
-            resultText = await bridge!.dispatch(tc.name, args);
-            yield { type: 'progress', message: `tool ${tc.name} → ok` };
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            log(`tool ${tc.name} dispatch failed: ${msg}`);
-            resultText = `[tool error] ${msg}`;
-            yield { type: 'progress', message: `tool ${tc.name} → error` };
-          }
+        // Dispatch all tool calls in parallel. Each yields its own progress
+        // event after completion (in tool_call order — matches the order
+        // the LLM emitted them, which is the most readable for the user).
+        const dispatched = await Promise.all(
+          outcome.toolCalls.map(async (tc) => {
+            if (self.aborted) {
+              return { tc, resultText: '[aborted]', errored: true };
+            }
+            try {
+              const args = tc.arguments ? (JSON.parse(tc.arguments) as Record<string, unknown>) : {};
+              const resultText = await bridge!.dispatch(tc.name, args);
+              return { tc, resultText, errored: false };
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : String(err);
+              log(`tool ${tc.name} dispatch failed: ${msg}`);
+              return { tc, resultText: `[tool error] ${msg}`, errored: true };
+            }
+          }),
+        );
+        for (const { tc, resultText, errored } of dispatched) {
+          yield { type: 'progress', message: `tool ${tc.name} → ${errored ? 'error' : 'ok'}` };
           messages.push({ role: 'tool', tool_call_id: tc.id, content: resultText });
         }
         // Loop: re-stream with the tool results as new context.
@@ -343,10 +369,12 @@ class OpenAIProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
   private readonly env: Record<string, string | undefined>;
   private readonly mcpServers: Record<string, McpServerConfig>;
+  private readonly assistantName: string | undefined;
 
   constructor(opts: ProviderOptions = {}) {
     this.env = opts.env ?? (process.env as Record<string, string | undefined>);
     this.mcpServers = opts.mcpServers ?? {};
+    this.assistantName = opts.assistantName;
   }
 
   query(input: QueryInput): AgentQuery {
@@ -357,7 +385,7 @@ class OpenAIProvider implements AgentProvider {
       throw new Error('[openai-provider] OPENAI_API_KEY env required');
     }
     log(`provider ready (model=${model}, baseUrl=${baseUrl}, mcpServers=${Object.keys(this.mcpServers).length})`);
-    return new OpenAIQuery(input, baseUrl, apiKey, model, this.mcpServers);
+    return new OpenAIQuery(input, baseUrl, apiKey, model, this.mcpServers, this.assistantName);
   }
 
   isSessionInvalid(_err: unknown): boolean {
