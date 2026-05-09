@@ -133,12 +133,13 @@ describe('platformFetch', () => {
     expect(mock).not.toHaveBeenCalled();
   });
 
-  it('refuses to call denied LLM-provider URLs (egress allowlist)', async () => {
+  it('refuses to call always-denied LLM-provider URLs (egress allowlist)', async () => {
+    // OpenAI is always denied regardless of MAIN_MODEL_ROUTE — route-independent test.
     const mock = vi.fn().mockResolvedValue(new Response('ok'));
     vi.stubGlobal('fetch', mock);
 
-    await expect(platformFetch('https://api.anthropic.com/v1/messages')).rejects.toThrow(
-      /direct call to api\.anthropic\.com is blocked/
+    await expect(platformFetch('https://api.openai.com/v1/chat/completions')).rejects.toThrow(
+      /direct call to api\.openai\.com is blocked/
     );
     expect(mock).not.toHaveBeenCalled();
   });
