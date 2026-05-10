@@ -128,10 +128,12 @@ interface ParsedMessage {
  *
  * What we forward:
  *   - text_delta on a stream_event → live `text` chunk (token streaming)
- *   - content_block_start for tool_use → live `tool_call` (renders as
- *     a status line "→ WebSearch …")
- *   - tool_result blocks on user messages → live `tool_result` (renders
- *     "← WebSearch ok" / "← WebSearch error")
+ *   - tool_use blocks at content_block_stop → live `tool_call` carrying
+ *     the fully-assembled input (renders as `→ WebSearch: <query>`).
+ *     We accumulate input_json_delta chunks per block index across the
+ *     stream because the input arrives token-by-token after the block
+ *     opens, not at content_block_start.
+ *   - tool_result blocks on user messages → live `tool_result`
  *
  * What we deliberately drop (already covered by outbound.db audit + the
  * `done` event we emit at end of stream):
@@ -139,6 +141,19 @@ interface ParsedMessage {
  *     content; the assembled message is just a recap
  *   - thinking deltas — privacy default; can be opt-in later
  */
+
+/**
+ * Per-block state for in-flight tool_use blocks. Keyed by the
+ * content-block index from the SDK stream. The input streams in across
+ * many input_json_delta events; we accumulate the partial_json fragments
+ * here and parse + emit at content_block_stop.
+ *
+ * Map cleared opportunistically as blocks close. If the stream aborts
+ * mid-block, the entry leaks until the next process restart — harmless,
+ * agent-runner is short-lived.
+ */
+const toolUseBlocks: Map<number, { name: string; json: string }> = new Map();
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function emitLiveFromSdkMessage(message: any): void {
   try {
@@ -146,17 +161,65 @@ function emitLiveFromSdkMessage(message: any): void {
 
     if (message.type === 'stream_event' && message.event) {
       const ev = message.event;
+
       // Token-level text streaming.
       if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && typeof ev.delta.text === 'string') {
         if (ev.delta.text.length > 0) emitLive({ type: 'text', text: ev.delta.text });
         return;
       }
-      // Tool invocation announcement — fired when a new tool_use block
-      // opens. The input may still be streaming in via input_json_delta;
-      // we just need the name for the status line.
+
+      // Tool block opens — record name, prepare to accumulate input.
       if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
         const name = typeof ev.content_block.name === 'string' ? ev.content_block.name : 'tool';
-        emitLive({ type: 'tool_call', name, input: ev.content_block.input });
+        // The SDK sometimes seeds `input` with a partial object at
+        // content_block_start (typically `{}`); the rest streams as
+        // input_json_delta. Stringify the seed so we have a uniform
+        // accumulator type.
+        const seed =
+          ev.content_block.input && typeof ev.content_block.input === 'object'
+            ? Object.keys(ev.content_block.input).length > 0
+              ? JSON.stringify(ev.content_block.input)
+              : ''
+            : '';
+        toolUseBlocks.set(ev.index, { name, json: seed });
+        return;
+      }
+
+      // Tool input streaming.
+      if (ev.type === 'content_block_delta' && ev.delta?.type === 'input_json_delta') {
+        const entry = toolUseBlocks.get(ev.index);
+        if (entry && typeof ev.delta.partial_json === 'string') {
+          entry.json += ev.delta.partial_json;
+        }
+        return;
+      }
+
+      // Block closes — for tool_use blocks, this is when we have the
+      // full input and can emit a status line carrying the actual query.
+      if (ev.type === 'content_block_stop') {
+        const entry = toolUseBlocks.get(ev.index);
+        if (entry) {
+          let parsedInput: unknown = undefined;
+          if (entry.json) {
+            try {
+              parsedInput = JSON.parse(entry.json);
+            } catch {
+              // Malformed JSON shouldn't block the live render — fall
+              // back to the raw string so the REPL still has something
+              // to display.
+              parsedInput = entry.json;
+            }
+          }
+          emitLive({ type: 'tool_call', name: entry.name, input: parsedInput });
+          toolUseBlocks.delete(ev.index);
+        }
+        return;
+      }
+
+      // Turn end — clear any leftover blocks (shouldn't happen, but be
+      // defensive against partial streams).
+      if (ev.type === 'message_stop') {
+        toolUseBlocks.clear();
         return;
       }
       return;
