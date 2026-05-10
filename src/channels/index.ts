@@ -7,3 +7,7 @@
 // self-registration import below.
 
 import './cli.js';
+import './slack.js';
+import './linear.js';
+import './github.js';
+import './teams.js';
