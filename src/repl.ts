@@ -20,6 +20,7 @@
  */
 import * as fs from 'fs';
 import * as net from 'net';
+import * as os from 'os';
 import * as path from 'path';
 import * as readline from 'readline';
 import { spawn } from 'child_process';
@@ -167,6 +168,84 @@ function describeToolInput(name: string, input: unknown): string {
   return name;
 }
 
+function truncate(s: string, n: number): string {
+  // Collapse whitespace so a result with newlines / lots of spaces still
+  // fits on one line — important because tool results can be huge JSON
+  // blobs or multi-paragraph search summaries.
+  const flat = s.replace(/\s+/g, ' ').trim();
+  return flat.length > n ? flat.slice(0, n - 1) + '…' : flat;
+}
+
+/**
+ * State machine for rendering tool_call → … (waiting) → tool_result on
+ * a single growing line. Without this, a long-running tool (web search,
+ * remote API) shows `→ WebSearch: query` and then leaves the user
+ * staring at silence until the agent's prose starts streaming.
+ *
+ * Output shape:
+ *   → WebSearch: tamil nadu cm 2026 ......... ← Found: TVK won 108 …
+ *
+ * Dots are appended every TOOL_TICK_MS so the user can see the wait is
+ * intentional. On result we emit the summary on the same line and
+ * newline-terminate. Ownership of `lineDirty` belongs to the caller —
+ * we set it true while the tool line is open.
+ */
+const TOOL_TICK_MS = 700;
+function makeToolRenderer(setDirty: (dirty: boolean) => void): {
+  onCall: (name: string, input: unknown) => void;
+  onResult: (ok: boolean, summary?: string) => void;
+  cleanup: () => void;
+} {
+  let tickTimer: NodeJS.Timeout | null = null;
+  let active = false;
+
+  function stopTimer(): void {
+    if (tickTimer) {
+      clearInterval(tickTimer);
+      tickTimer = null;
+    }
+  }
+
+  return {
+    onCall(name, input) {
+      // Defensive: if a prior tool didn't get its result event, close it.
+      if (active) {
+        stopTimer();
+        process.stdout.write('\n');
+      }
+      process.stdout.write(kleur.dim(`→ ${describeToolInput(name, input)} `));
+      active = true;
+      setDirty(true);
+      tickTimer = setInterval(() => {
+        process.stdout.write(kleur.dim('.'));
+      }, TOOL_TICK_MS);
+    },
+    onResult(ok, summary) {
+      stopTimer();
+      if (!active) {
+        // Tool result without a preceding call — render bare.
+        const tag = ok ? kleur.green('←') : kleur.red('← err');
+        const detail = summary ? kleur.dim(' ' + truncate(summary, 120)) : '';
+        process.stdout.write(tag + detail + '\n');
+        return;
+      }
+      const tag = ok ? kleur.green(' ←') : kleur.red(' ← err');
+      const detail = summary ? kleur.dim(' ' + truncate(summary, 120)) : kleur.dim(ok ? ' ok' : '');
+      process.stdout.write(tag + detail + '\n');
+      active = false;
+      setDirty(false);
+    },
+    cleanup() {
+      stopTimer();
+      if (active) {
+        process.stdout.write('\n');
+        active = false;
+        setDirty(false);
+      }
+    },
+  };
+}
+
 // ─── One-shot mode ──────────────────────────────────────────────────
 
 export async function runOneShot(text: string): Promise<number> {
@@ -180,11 +259,15 @@ export async function runOneShot(text: string): Promise<number> {
     let firstReplyTimer: NodeJS.Timeout | null = null;
     let turnHardTimer: NodeJS.Timeout | null = null;
     let lineDirty = false; // true when the current line has unflushed live text
+    const tools = makeToolRenderer((dirty) => {
+      lineDirty = dirty;
+    });
 
     const exit = (code: number): void => {
       if (silenceTimer) clearTimeout(silenceTimer);
       if (firstReplyTimer) clearTimeout(firstReplyTimer);
       if (turnHardTimer) clearTimeout(turnHardTimer);
+      tools.cleanup();
       if (lineDirty) process.stdout.write('\n');
       socket.end();
       resolve(code);
@@ -231,18 +314,16 @@ export async function runOneShot(text: string): Promise<number> {
             process.stdout.write('\n');
             lineDirty = false;
           }
-          process.stdout.write(kleur.dim(`→ ${describeToolInput(frame.name, frame.input)}\n`));
-          // Tool call started — agent will be busy for a while (web search,
-          // bash, etc.). Cancel any silence timer so we don't bail out
-          // mid-tool. The `done` event will trigger exit; silence is just
-          // the legacy fallback for non-live channels.
+          tools.onCall(frame.name, frame.input);
+          // Tool call started — agent will be busy for a while (web
+          // search, bash, etc.). Cancel any silence timer so we don't
+          // bail mid-tool. The `done` event will trigger exit.
           if (silenceTimer) {
             clearTimeout(silenceTimer);
             silenceTimer = null;
           }
         } else if (frame.kind === 'tool_result') {
-          const tag = frame.ok ? kleur.green('← ok') : kleur.red(`← err${frame.summary ? `: ${frame.summary}` : ''}`);
-          process.stdout.write(kleur.dim(tag) + '\n');
+          tools.onResult(frame.ok, frame.summary);
         } else if (frame.kind === 'done') {
           if (lineDirty) {
             process.stdout.write('\n');
@@ -350,6 +431,35 @@ function printReplBanner(env: NodeJS.ProcessEnv): void {
   console.log('');
 }
 
+/**
+ * Persistent input history. Loaded once at REPL start, appended on each
+ * non-empty line entry. Lets up-arrow recall both this session's lines
+ * and prior sessions'.
+ */
+const HISTORY_FILE = path.join(process.env.HOME || os.homedir(), '.a8', 'a8-claw-history');
+const HISTORY_MAX = 1000;
+
+function loadReplHistory(): string[] {
+  try {
+    const raw = fs.readFileSync(HISTORY_FILE, 'utf8');
+    const lines = raw.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+    // readline expects newest-first.
+    return lines.slice(-HISTORY_MAX).reverse();
+  } catch {
+    return [];
+  }
+}
+
+function appendReplHistory(line: string): void {
+  if (!line.trim()) return;
+  try {
+    fs.mkdirSync(path.dirname(HISTORY_FILE), { recursive: true });
+    fs.appendFileSync(HISTORY_FILE, line + '\n');
+  } catch {
+    // Best-effort; history persistence is a nicety, not a requirement.
+  }
+}
+
 export async function runRepl(): Promise<number> {
   await ensureDaemon();
   const socket = net.connect(SOCKET_PATH);
@@ -361,6 +471,10 @@ export async function runRepl(): Promise<number> {
     input: process.stdin,
     output: process.stdout,
     prompt: kleur.cyan('you > '),
+    history: loadReplHistory(),
+    historySize: HISTORY_MAX,
+    removeHistoryDuplicates: true,
+    terminal: true,
   });
 
   let waitingForReply = false;
@@ -368,16 +482,20 @@ export async function runRepl(): Promise<number> {
   let quietTimer: NodeJS.Timeout | null = null;
   const QUIET_MS = 1_500;
 
+  let lineDirty = false;
+  const tools = makeToolRenderer((dirty) => {
+    lineDirty = dirty;
+  });
+
   function rePrompt(): void {
     waitingForReply = false;
     if (quietTimer) {
       clearTimeout(quietTimer);
       quietTimer = null;
     }
+    tools.cleanup();
     rl.prompt();
   }
-
-  let lineDirty = false;
 
   reader.onFrame((frame) => {
     lastActivity = Date.now();
@@ -388,7 +506,7 @@ export async function runRepl(): Promise<number> {
           process.stdout.write('\n');
           lineDirty = false;
         }
-        process.stdout.write(kleur.dim(`→ ${describeToolInput(frame.name, frame.input)}\n`));
+        tools.onCall(frame.name, frame.input);
         // Tool work in progress — cancel the quiet timer so we don't
         // re-prompt mid-tool. `done` (or text frames) will rearm it.
         if (quietTimer) {
@@ -397,8 +515,7 @@ export async function runRepl(): Promise<number> {
         }
         return;
       } else if (frame.kind === 'tool_result') {
-        const tag = frame.ok ? kleur.green('← ok') : kleur.red(`← err${frame.summary ? `: ${frame.summary}` : ''}`);
-        process.stdout.write(kleur.dim(tag) + '\n');
+        tools.onResult(frame.ok, frame.summary);
       } else if (frame.kind === 'done') {
         if (lineDirty) {
           process.stdout.write('\n');
@@ -471,6 +588,7 @@ export async function runRepl(): Promise<number> {
         rl.close();
         return;
       }
+      appendReplHistory(text);
       socket.write(JSON.stringify({ text }) + '\n');
       waitingForReply = true;
       // No prompt yet — wait for replies + quiet period to re-prompt.
