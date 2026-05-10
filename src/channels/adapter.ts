@@ -100,6 +100,18 @@ export interface OutboundMessage {
   files?: OutboundFile[]; // file attachments from the session outbox
 }
 
+/**
+ * Live-render events emitted from inside the per-session container as the
+ * agent's response is being generated. Mirrors the wire format on stdout
+ * (see container/agent-runner/src/live-render.ts) so the host can
+ * `JSON.parse` a line and pass the result straight to deliverLive().
+ */
+export type LiveEvent =
+  | { type: 'text'; text: string }
+  | { type: 'tool_call'; name: string; input?: unknown }
+  | { type: 'tool_result'; name: string; ok: boolean; summary?: string }
+  | { type: 'done' };
+
 /** Discovered conversation info (from syncConversations). */
 export interface ConversationInfo {
   platformId: string;
@@ -131,6 +143,19 @@ export interface ChannelAdapter {
 
   // Outbound delivery — returns the platform message ID if available
   deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<string | undefined>;
+
+  /**
+   * Live render side-channel — token-level streaming, tool calls, and
+   * tool results forwarded from the container's stdout for media that
+   * support real-time render (today: cli; future: mission-queue with
+   * SSE bus). Adapters that don't subscribe (Slack, Telegram, etc.)
+   * leave this undefined and continue to consume final batched rows
+   * from outbound.db.
+   *
+   * deliverLive is fire-and-forget: the host calls it without awaiting,
+   * so a slow socket cannot back-pressure the SDK stream.
+   */
+  deliverLive?(event: LiveEvent): void;
 
   // Optional
   setTyping?(platformId: string, threadId: string | null): Promise<void>;

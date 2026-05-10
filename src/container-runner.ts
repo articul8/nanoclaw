@@ -19,6 +19,8 @@ import {
   ONECLI_URL,
   TIMEZONE,
 } from './config.js';
+import type { LiveEvent } from './channels/adapter.js';
+import { getChannelAdapter } from './channels/channel-registry.js';
 import { readContainerConfig, writeContainerConfig } from './container-config.js';
 import { CONTAINER_RUNTIME_BIN, hostGatewayArgs, readonlyMountArgs, stopContainer } from './container-runtime.js';
 import { composeGroupClaudeMd } from './claude-md-compose.js';
@@ -66,6 +68,40 @@ export function getActiveContainerCount(): number {
 
 export function isContainerRunning(sessionId: string): boolean {
   return activeContainers.has(sessionId);
+}
+
+const LIVE_EVENT_PREFIX = '__a8_live__:';
+
+/**
+ * Parse a single stdout line from a container; if it carries a live-render
+ * event, forward to the cli adapter so the user's terminal renders the
+ * SDK token stream in real time.
+ *
+ * Lines without the magic prefix are routed to the debug log alongside
+ * stderr — agent-runner's own logs go through `console.error`, but
+ * stray println calls in dependencies sometimes land on stdout.
+ *
+ * Today only the cli adapter subscribes to live events. Mission-queue +
+ * SSE channels will subscribe later. Slack / Telegram / etc. continue
+ * to consume final batched rows from outbound.db unchanged.
+ */
+function forwardLiveLine(line: string, containerLabel: string): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  if (!trimmed.startsWith(LIVE_EVENT_PREFIX)) {
+    log.info(`stdout: ${trimmed.slice(0, 200)}`, { container: containerLabel });
+    return;
+  }
+  let event: LiveEvent;
+  try {
+    event = JSON.parse(trimmed.slice(LIVE_EVENT_PREFIX.length)) as LiveEvent;
+  } catch {
+    log.warn(`live event parse failed: ${trimmed.slice(0, 200)}`, { container: containerLabel });
+    return;
+  }
+  log.info(`live: ${event.type}`, { container: containerLabel });
+  const cli = getChannelAdapter('cli');
+  cli?.deliverLive?.(event);
 }
 
 /**
@@ -167,8 +203,19 @@ async function spawnContainer(session: Session): Promise<void> {
     }
   });
 
-  // stdout is unused in v2 (all IO is via session DB)
-  container.stdout?.on('data', () => {});
+  // stdout carries the live-render side-channel — JSON-line events
+  // prefixed with `__a8_live__:` for token-level streaming + tool calls.
+  // See container/agent-runner/src/live-render.ts.
+  let stdoutBuffer = '';
+  container.stdout?.on('data', (data: Buffer) => {
+    stdoutBuffer += data.toString('utf8');
+    let nl: number;
+    while ((nl = stdoutBuffer.indexOf('\n')) >= 0) {
+      const line = stdoutBuffer.slice(0, nl);
+      stdoutBuffer = stdoutBuffer.slice(nl + 1);
+      forwardLiveLine(line, agentGroup.folder);
+    }
+  });
 
   // No host-side idle timeout. Stale/stuck detection is driven by the host
   // sweep reading heartbeat mtime + processing_ack claim age + container_state

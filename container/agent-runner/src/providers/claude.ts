@@ -4,6 +4,7 @@ import path from 'path';
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
+import { emitLive } from '../live-render.js';
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, McpServerConfig, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
@@ -116,6 +117,76 @@ class MessageStream {
 interface ParsedMessage {
   role: 'user' | 'assistant';
   content: string;
+}
+
+/**
+ * Translate one SDK message into zero-or-more live-render events.
+ *
+ * The events are emitted via emitLive() which writes to stdout — the
+ * host's container-runner parses them and forwards each to the active
+ * channel adapter (cli today; mission-queue / others later).
+ *
+ * What we forward:
+ *   - text_delta on a stream_event → live `text` chunk (token streaming)
+ *   - content_block_start for tool_use → live `tool_call` (renders as
+ *     a status line "→ WebSearch …")
+ *   - tool_result blocks on user messages → live `tool_result` (renders
+ *     "← WebSearch ok" / "← WebSearch error")
+ *
+ * What we deliberately drop (already covered by outbound.db audit + the
+ * `done` event we emit at end of stream):
+ *   - whole-block 'assistant' messages — text deltas already covered the
+ *     content; the assembled message is just a recap
+ *   - thinking deltas — privacy default; can be opt-in later
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function emitLiveFromSdkMessage(message: any): void {
+  try {
+    if (!message || typeof message !== 'object') return;
+
+    if (message.type === 'stream_event' && message.event) {
+      const ev = message.event;
+      // Token-level text streaming.
+      if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && typeof ev.delta.text === 'string') {
+        if (ev.delta.text.length > 0) emitLive({ type: 'text', text: ev.delta.text });
+        return;
+      }
+      // Tool invocation announcement — fired when a new tool_use block
+      // opens. The input may still be streaming in via input_json_delta;
+      // we just need the name for the status line.
+      if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') {
+        const name = typeof ev.content_block.name === 'string' ? ev.content_block.name : 'tool';
+        emitLive({ type: 'tool_call', name, input: ev.content_block.input });
+        return;
+      }
+      return;
+    }
+
+    // Tool results land on a 'user' message after the SDK runs the tool.
+    if (message.type === 'user' && message.message?.content && Array.isArray(message.message.content)) {
+      for (const block of message.message.content) {
+        if (block?.type === 'tool_result') {
+          const ok = !block.is_error;
+          // Take a short summary of the result for the status line —
+          // result content is usually a string or an array of {type:'text',text}.
+          let summary: string | undefined;
+          if (typeof block.content === 'string') {
+            summary = block.content.slice(0, 120);
+          } else if (Array.isArray(block.content)) {
+            const firstText = block.content.find((c: { type?: string; text?: string }) => c.type === 'text' && c.text);
+            if (firstText?.text) summary = firstText.text.slice(0, 120);
+          }
+          // We don't have the tool name on the result block (only the
+          // tool_use_id which links back). Leave name empty — the REPL
+          // can render "← ok / err" without it.
+          emitLive({ type: 'tool_result', name: '', ok, summary });
+        }
+      }
+    }
+  } catch {
+    // Live channel is best-effort; never let it break the main translate
+    // loop or the audit DB write.
+  }
 }
 
 function parseTranscript(content: string): ParsedMessage[] {
@@ -286,6 +357,12 @@ export class ClaudeProvider implements AgentProvider {
         additionalDirectories: this.additionalDirectories,
         resume: input.continuation,
         pathToClaudeCodeExecutable: '/pnpm/bin/claude',
+        // includePartialMessages enables `stream_event` SDK messages, which
+        // carry token-level text_delta + tool_use_start. We forward those
+        // to live-render so the user's terminal sees the reply form in real
+        // time. Without this, the SDK only emits whole-block 'assistant'
+        // messages and the user waits in silence for the full turn.
+        includePartialMessages: true,
         systemPrompt: instructions ? { type: 'preset' as const, preset: 'claude_code' as const, append: instructions } : undefined,
         allowedTools: [
           ...TOOL_ALLOWLIST,
@@ -317,10 +394,22 @@ export class ClaudeProvider implements AgentProvider {
         // Yield activity for every SDK event so the poll loop knows the agent is working
         yield { type: 'activity' };
 
+        // Live render side-channel: forward token-level deltas + tool calls
+        // to stdout so the host's container-runner can pipe them straight
+        // to the user's terminal. This bypasses the outbound.db poll cycle
+        // (which is batch + on-disk + 500ms-latency) entirely. The audit
+        // row is still written at end-of-turn, async, never gating render.
+        emitLiveFromSdkMessage(message);
+
         if (message.type === 'system' && message.subtype === 'init') {
           yield { type: 'init', continuation: message.session_id };
         } else if (message.type === 'result') {
           const text = 'result' in message ? (message as { result?: string }).result ?? null : null;
+          // SDK keeps its stream open across turns (push() feeds the same
+          // query). `result` is the end-of-turn marker — that's when the
+          // live channel needs its `done` so the REPL can re-prompt.
+          // (Emitting `done` only at end-of-iterable would never fire.)
+          emitLive({ type: 'done' });
           yield { type: 'result', text };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'api_retry') {
           yield { type: 'error', message: 'API retry', retryable: true };
@@ -335,6 +424,9 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'progress', message: tn.summary || 'Task notification' };
         }
       }
+      // End-of-turn marker on the live channel so the REPL knows to
+      // flush its trailing newline + re-prompt.
+      emitLive({ type: 'done' });
       log(`Query completed after ${messageCount} SDK messages`);
     }
 

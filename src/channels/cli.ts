@@ -39,7 +39,7 @@ import path from 'path';
 
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
-import type { ChannelAdapter, ChannelSetup, DeliveryAddress, InboundEvent, OutboundMessage } from './adapter.js';
+import type { ChannelAdapter, ChannelSetup, DeliveryAddress, InboundEvent, LiveEvent, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 const PLATFORM_ID = 'local';
@@ -51,6 +51,12 @@ function socketPath(): string {
 function createAdapter(): ChannelAdapter {
   let server: net.Server | null = null;
   let client: net.Socket | null = null;
+  // Set while the container is streaming this turn's reply via deliverLive.
+  // Used to suppress the end-of-turn outbound.db deliver, which otherwise
+  // re-renders the same text the user already watched stream in.
+  // outbound.db is still written — it's our audit log — but the cli render
+  // path treats live events as authoritative.
+  let liveTurnRendered = false;
 
   const adapter: ChannelAdapter = {
     name: 'cli',
@@ -124,14 +130,46 @@ function createAdapter(): ChannelAdapter {
         // (or never, if we don't add scroll-back). Not worth throwing.
         return undefined;
       }
+      // Suppress final-text delivery if we already streamed this turn
+      // live. Without this, the user sees their reply twice: once
+      // streamed, once batched at end-of-turn from outbound.db. Don't
+      // clear the flag here — the daemon's own dual-spawn race (router
+      // + sweep both wake the same session) can produce N audit rows
+      // for one logical turn, and they all need suppressing. The flag
+      // is reset only when the user sends a fresh inbound (handleLine),
+      // i.e. a new turn begins.
       const text = extractText(message);
       if (text === null) return undefined;
+      if (liveTurnRendered) {
+        return undefined;
+      }
       try {
         client.write(JSON.stringify({ text }) + '\n');
       } catch (err) {
         log.warn('Failed to write to CLI client', { err });
       }
       return undefined;
+    },
+
+    deliverLive(event: LiveEvent): void {
+      if (!client) return;
+      try {
+        if (event.type === 'text') {
+          liveTurnRendered = true;
+          client.write(JSON.stringify({ partial: true, text: event.text }) + '\n');
+        } else if (event.type === 'tool_call') {
+          liveTurnRendered = true;
+          client.write(JSON.stringify({ kind: 'tool_call', name: event.name, input: event.input }) + '\n');
+        } else if (event.type === 'tool_result') {
+          client.write(JSON.stringify({ kind: 'tool_result', name: event.name, ok: event.ok, summary: event.summary }) + '\n');
+        } else if (event.type === 'done') {
+          // liveTurnRendered stays true until the audit deliver consumes
+          // it — that's how we suppress the duplicate batch render.
+          client.write(JSON.stringify({ kind: 'done' }) + '\n');
+        }
+      } catch (err) {
+        log.warn('Failed to write live event to CLI client', { err });
+      }
     },
   };
 
@@ -228,6 +266,10 @@ function createAdapter(): ChannelAdapter {
     // Plain chat — claim the slot (evicting any prior client) and route via
     // the standard onInbound path (adapter injects its own channelType).
     claimChatSlot();
+    // Fresh turn — reset the live-render dedup flag so any audit-batch
+    // delivery from THIS turn can suppress while delivers from the
+    // previous turn (already past) don't get accidentally suppressed.
+    liveTurnRendered = false;
     try {
       await config.onInbound(PLATFORM_ID, null, {
         id: `cli-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

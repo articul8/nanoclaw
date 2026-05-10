@@ -36,7 +36,8 @@ const SOCKET_PATH = path.join(ROOT, 'data', 'cli.sock');
 
 const DAEMON_BOOT_TIMEOUT_MS = 30_000;
 const ONESHOT_FIRST_REPLY_TIMEOUT_MS = 60_000;
-const ONESHOT_SILENCE_MS = 2_000;
+const ONESHOT_TURN_HARD_TIMEOUT_MS = 600_000; // 10 min upper bound — covers long web searches + tool chains
+const ONESHOT_SILENCE_MS = 5_000; // batch-fallback only — `done` event preempts
 
 // ─── Socket reachability + daemon supervision ──────────────────────
 
@@ -97,21 +98,38 @@ export async function ensureDaemon(): Promise<{ started: boolean; pid?: number }
     }
     await sleep(500);
   }
-  throw new Error(
-    `daemon failed to start within ${DAEMON_BOOT_TIMEOUT_MS}ms — see ${logPath} for details`,
-  );
+  throw new Error(`daemon failed to start within ${DAEMON_BOOT_TIMEOUT_MS}ms — see ${logPath} for details`);
 }
 
 // ─── Reply parser (shared) ──────────────────────────────────────────
 
+/**
+ * Frame parsed off the cli socket. Two flavors share the same wire:
+ *   - Final / batch reply:  { text: "...", partial?: false }
+ *   - Live stream event:    { partial: true, text: "..." }
+ *                            { kind: "tool_call", name, input }
+ *                            { kind: "tool_result", name, ok, summary }
+ *                            { kind: "done" }
+ *
+ * The live-stream events come from the container's stdout via
+ * deliverLive(); they bypass the outbound.db audit cycle so the user
+ * sees the agent's reply form in real time. Final batch frames are the
+ * audit fall-back, suppressed by the cli adapter when live render
+ * already covered the turn.
+ */
+type ReplyFrame =
+  | { kind?: 'tool_call'; name: string; input?: unknown }
+  | { kind?: 'tool_result'; name: string; ok: boolean; summary?: string }
+  | { kind?: 'done' }
+  | { partial?: boolean; text: string };
+
 interface SocketReader {
-  /** Forward each agent reply line (already JSON-parsed) to the handler. */
-  onReply(handler: (text: string) => void): void;
+  onFrame(handler: (frame: ReplyFrame) => void): void;
 }
 
 function attachReader(socket: net.Socket): SocketReader {
   let buffer = '';
-  let handler: ((text: string) => void) | null = null;
+  let handler: ((frame: ReplyFrame) => void) | null = null;
   socket.on('data', (chunk: Buffer) => {
     buffer += chunk.toString('utf8');
     let idx: number;
@@ -120,18 +138,33 @@ function attachReader(socket: net.Socket): SocketReader {
       buffer = buffer.slice(idx + 1);
       if (!line) continue;
       try {
-        const msg = JSON.parse(line) as { text?: unknown };
-        if (typeof msg.text === 'string' && handler) handler(msg.text);
+        const msg = JSON.parse(line) as ReplyFrame;
+        if (handler) handler(msg);
       } catch {
         // Ignore non-JSON lines — forward compatibility.
       }
     }
   });
   return {
-    onReply(h) {
+    onFrame(h) {
       handler = h;
     },
   };
+}
+
+function describeToolInput(name: string, input: unknown): string {
+  if (!input || typeof input !== 'object') return name;
+  const i = input as Record<string, unknown>;
+  // Hand-pick the most identifying field for common tools so the user
+  // sees something meaningful ("WebSearch: tamilnadu elections") rather
+  // than the bare tool name.
+  if (typeof i.query === 'string') return `${name}: ${i.query}`;
+  if (typeof i.url === 'string') return `${name}: ${i.url}`;
+  if (typeof i.command === 'string') return `${name}: ${i.command.slice(0, 80)}`;
+  if (typeof i.file_path === 'string') return `${name}: ${i.file_path}`;
+  if (typeof i.path === 'string') return `${name}: ${i.path}`;
+  if (typeof i.pattern === 'string') return `${name}: ${i.pattern}`;
+  return name;
 }
 
 // ─── One-shot mode ──────────────────────────────────────────────────
@@ -144,13 +177,22 @@ export async function runOneShot(text: string): Promise<number> {
 
     let firstReply = false;
     let silenceTimer: NodeJS.Timeout | null = null;
-    let hardTimer: NodeJS.Timeout | null = null;
+    let firstReplyTimer: NodeJS.Timeout | null = null;
+    let turnHardTimer: NodeJS.Timeout | null = null;
+    let lineDirty = false; // true when the current line has unflushed live text
 
     const exit = (code: number): void => {
       if (silenceTimer) clearTimeout(silenceTimer);
-      if (hardTimer) clearTimeout(hardTimer);
+      if (firstReplyTimer) clearTimeout(firstReplyTimer);
+      if (turnHardTimer) clearTimeout(turnHardTimer);
+      if (lineDirty) process.stdout.write('\n');
       socket.end();
       resolve(code);
+    };
+
+    const armSilence = (): void => {
+      if (silenceTimer) clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(() => exit(0), ONESHOT_SILENCE_MS);
     };
 
     socket.on('error', (e: NodeJS.ErrnoException) => {
@@ -160,23 +202,73 @@ export async function runOneShot(text: string): Promise<number> {
 
     socket.on('connect', () => {
       socket.write(JSON.stringify({ text }) + '\n');
-      hardTimer = setTimeout(() => {
+      // Two distinct safety nets:
+      //   firstReplyTimer — bail out fast if the daemon never sends anything
+      //                     (likely wiring problem, not a slow tool)
+      //   turnHardTimer   — absolute ceiling for the whole turn, in case
+      //                     `done` never arrives (agent hung mid-tool, etc.)
+      firstReplyTimer = setTimeout(() => {
         if (!firstReply) {
           console.error(kleur.red(`timeout: no reply in ${ONESHOT_FIRST_REPLY_TIMEOUT_MS}ms`));
           exit(3);
         }
       }, ONESHOT_FIRST_REPLY_TIMEOUT_MS);
+      turnHardTimer = setTimeout(() => {
+        console.error(kleur.red(`timeout: turn exceeded ${ONESHOT_TURN_HARD_TIMEOUT_MS / 1000}s`));
+        exit(4);
+      }, ONESHOT_TURN_HARD_TIMEOUT_MS);
     });
 
-    reader.onReply((replyText) => {
-      process.stdout.write(replyText + '\n');
+    reader.onFrame((frame) => {
       firstReply = true;
-      if (hardTimer) {
-        clearTimeout(hardTimer);
-        hardTimer = null;
+      if (firstReplyTimer) {
+        clearTimeout(firstReplyTimer);
+        firstReplyTimer = null;
       }
-      if (silenceTimer) clearTimeout(silenceTimer);
-      silenceTimer = setTimeout(() => exit(0), ONESHOT_SILENCE_MS);
+      if ('kind' in frame && frame.kind) {
+        if (frame.kind === 'tool_call') {
+          if (lineDirty) {
+            process.stdout.write('\n');
+            lineDirty = false;
+          }
+          process.stdout.write(kleur.dim(`→ ${describeToolInput(frame.name, frame.input)}\n`));
+          // Tool call started — agent will be busy for a while (web search,
+          // bash, etc.). Cancel any silence timer so we don't bail out
+          // mid-tool. The `done` event will trigger exit; silence is just
+          // the legacy fallback for non-live channels.
+          if (silenceTimer) {
+            clearTimeout(silenceTimer);
+            silenceTimer = null;
+          }
+        } else if (frame.kind === 'tool_result') {
+          const tag = frame.ok ? kleur.green('← ok') : kleur.red(`← err${frame.summary ? `: ${frame.summary}` : ''}`);
+          process.stdout.write(kleur.dim(tag) + '\n');
+        } else if (frame.kind === 'done') {
+          if (lineDirty) {
+            process.stdout.write('\n');
+            lineDirty = false;
+          }
+          // Authoritative end-of-turn — exit immediately rather than
+          // waiting for the silence timer.
+          exit(0);
+        }
+        return;
+      }
+      // Text frame — partial or batch.
+      const f = frame as { partial?: boolean; text: string };
+      if (f.partial) {
+        process.stdout.write(f.text);
+        lineDirty = !f.text.endsWith('\n');
+        // Don't arm silence on partial text — we're mid-stream. Wait for
+        // `done` (or a long quiet from a non-live channel).
+      } else {
+        if (lineDirty) {
+          process.stdout.write('\n');
+          lineDirty = false;
+        }
+        process.stdout.write(f.text + '\n');
+        armSilence();
+      }
     });
 
     socket.on('close', () => exit(firstReply ? 0 : 3));
@@ -248,10 +340,11 @@ function printReplBanner(env: NodeJS.ProcessEnv): void {
   const provider = env.MAIN_MODEL_PROVIDER ?? 'anthropic';
   const model = env.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6';
   const state = env.CONNECTION_STATE ?? 'offline';
-  const stateColor =
-    state === 'connected' ? kleur.green : state === 'incognito' ? kleur.magenta : kleur.yellow;
+  const stateColor = state === 'connected' ? kleur.green : state === 'incognito' ? kleur.magenta : kleur.yellow;
   console.log('');
-  console.log(`${kleur.bold('a8-claw')}  ${kleur.dim('•')}  ${user}@${tenant}  ${kleur.dim('•')}  ${stateColor(state)}  ${kleur.dim('•')}  ${provider} / ${model}`);
+  console.log(
+    `${kleur.bold('a8-claw')}  ${kleur.dim('•')}  ${user}@${tenant}  ${kleur.dim('•')}  ${stateColor(state)}  ${kleur.dim('•')}  ${provider} / ${model}`,
+  );
   console.log(kleur.dim('─────────────────────────────────────────────────────────────────'));
   console.log(kleur.dim('Type a message, or /help for commands. /exit to leave.'));
   console.log('');
@@ -284,17 +377,65 @@ export async function runRepl(): Promise<number> {
     rl.prompt();
   }
 
-  reader.onReply((text) => {
-    if (!waitingForReply) {
-      // Server-initiated message (rare, but allowed by the protocol).
-      process.stdout.write('\n' + text + '\n');
-    } else {
-      process.stdout.write(text + '\n');
-    }
+  let lineDirty = false;
+
+  reader.onFrame((frame) => {
     lastActivity = Date.now();
+
+    if ('kind' in frame && frame.kind) {
+      if (frame.kind === 'tool_call') {
+        if (lineDirty) {
+          process.stdout.write('\n');
+          lineDirty = false;
+        }
+        process.stdout.write(kleur.dim(`→ ${describeToolInput(frame.name, frame.input)}\n`));
+        // Tool work in progress — cancel the quiet timer so we don't
+        // re-prompt mid-tool. `done` (or text frames) will rearm it.
+        if (quietTimer) {
+          clearTimeout(quietTimer);
+          quietTimer = null;
+        }
+        return;
+      } else if (frame.kind === 'tool_result') {
+        const tag = frame.ok ? kleur.green('← ok') : kleur.red(`← err${frame.summary ? `: ${frame.summary}` : ''}`);
+        process.stdout.write(kleur.dim(tag) + '\n');
+      } else if (frame.kind === 'done') {
+        if (lineDirty) {
+          process.stdout.write('\n');
+          lineDirty = false;
+        }
+        // Authoritative end-of-turn — re-prompt immediately rather than
+        // waiting for the quiet timer.
+        rePrompt();
+        return;
+      }
+    } else {
+      const f = frame as { partial?: boolean; text: string };
+      if (f.partial) {
+        // First chunk after sending: drop a leading newline so the
+        // streamed reply doesn't start on the same line as `you > foo`.
+        if (!waitingForReply && !lineDirty) process.stdout.write('\n');
+        process.stdout.write(f.text);
+        lineDirty = !f.text.endsWith('\n');
+      } else {
+        if (!waitingForReply) process.stdout.write('\n');
+        if (lineDirty) {
+          process.stdout.write('\n');
+          lineDirty = false;
+        }
+        process.stdout.write(f.text + '\n');
+      }
+    }
+
     if (quietTimer) clearTimeout(quietTimer);
     quietTimer = setTimeout(() => {
-      if (Date.now() - lastActivity >= QUIET_MS) rePrompt();
+      if (Date.now() - lastActivity >= QUIET_MS) {
+        if (lineDirty) {
+          process.stdout.write('\n');
+          lineDirty = false;
+        }
+        rePrompt();
+      }
     }, QUIET_MS);
   });
 
