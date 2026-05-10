@@ -400,6 +400,40 @@ function ensureSetup(): void {
   }
 }
 
+/**
+ * If no agent group has been wired yet, run scripts/init-cli-agent.ts to
+ * create one bound to the local CLI channel. The script is idempotent
+ * (reuses an existing folder), so calling it on subsequent runs is a
+ * no-op-ish DB read. Without this, the host daemon starts but `chat`
+ * has nowhere to route messages — the user's first attempt fails opaquely.
+ */
+function ensureCliAgent(env: EnvDict): void {
+  const groupsDir = path.join(ROOT, 'groups');
+  const hasAnyGroup =
+    fs.existsSync(groupsDir) &&
+    fs.readdirSync(groupsDir).some((entry) => {
+      try {
+        return fs.statSync(path.join(groupsDir, entry)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+  if (hasAnyGroup) return;
+
+  console.error('▶  Wiring CLI channel to a fresh agent group...');
+  const displayName = env.USER_ID || os.userInfo().username || 'operator';
+  const status = run('pnpm', [
+    'exec',
+    'tsx',
+    'scripts/init-cli-agent.ts',
+    '--display-name',
+    displayName,
+    '--agent-name',
+    'Claude',
+  ]);
+  if (status !== 0) throw new Error('init-cli-agent.ts failed');
+}
+
 // ─── subcommands ────────────────────────────────────────────────────
 
 async function cmdStart(): Promise<void> {
@@ -420,6 +454,7 @@ async function cmdStart(): Promise<void> {
   ensureDeps();
   ensureBuild();
   ensureSetup();
+  ensureCliAgent(env);
 
   // --incognito flag overrides the persisted CONNECTION_STATE for this
   // invocation only (doesn't rewrite .env). Useful for one-off private chats.
