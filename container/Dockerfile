@@ -90,8 +90,11 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 #     binary (linux-arm64 variant on our image). Without the allowlist
 #     the SDK fails at spawn time with "native binary not found".
 ENV PNPM_HOME="/pnpm"
-ENV PATH="$PNPM_HOME:$PATH"
-RUN corepack enable
+# pnpm 10 puts globals at $PNPM_HOME; pnpm 11 puts them at $PNPM_HOME/bin and
+# refuses to install -g unless that path is in PATH. Include both so the
+# image survives a corepack-driven pnpm major bump.
+ENV PATH="$PNPM_HOME/bin:$PNPM_HOME:$PATH"
+RUN mkdir -p "$PNPM_HOME/bin" && corepack enable
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     echo "only-built-dependencies[]=agent-browser" > /root/.npmrc && \
@@ -103,6 +106,15 @@ RUN --mount=type=cache,target=/root/.cache/pnpm \
 
 RUN --mount=type=cache,target=/root/.cache/pnpm \
     pnpm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+
+# pnpm 11 ignores `.npmrc` only-built-dependencies for `pnpm install -g`, so
+# the postinstall that downloads the platform-native binary doesn't run.
+# Run it manually against the package's pnpm-store install path. Without this
+# the SDK throws "claude native binary not installed" at first invocation.
+RUN INSTALL_CJS=$(find /pnpm/store -name install.cjs -path '*@anthropic-ai/claude-code*' | head -1) && \
+    test -f "$INSTALL_CJS" && \
+    cd "$(dirname "$INSTALL_CJS")" && \
+    node install.cjs
 
 # ---- Entrypoint --------------------------------------------------------------
 COPY entrypoint.sh /app/entrypoint.sh

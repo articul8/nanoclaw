@@ -447,18 +447,22 @@ async function buildContainerArgs(
   }
 
   // OneCLI gateway — injects HTTPS_PROXY + certs so container API calls
-  // are routed through the agent vault for credential injection. Treated as
-  // a transient hard failure: if we can't wire the gateway, we don't spawn.
-  // The caller (router or host-sweep) catches the throw, leaves the inbound
-  // message pending, and the next sweep tick retries.
-  if (agentIdentifier) {
+  // are routed through the agent vault for credential injection. Optional
+  // in this fork: a8-claw runs containers direct (the agent calls
+  // Anthropic / Model Manager with credentials passed via env from the
+  // provider module), so when ONECLI_API_KEY is unset we skip the gateway
+  // entirely. Setting ONECLI_API_KEY (e.g. for ops that already have
+  // OneCLI provisioned) re-enables the upstream proxy path.
+  if (ONECLI_API_KEY && agentIdentifier) {
     await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (!onecliApplied) {
+      throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+    }
+    log.info('OneCLI gateway applied', { containerName });
+  } else {
+    log.debug('OneCLI gateway disabled (no ONECLI_API_KEY) — running direct', { containerName });
   }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
-  }
-  log.info('OneCLI gateway applied', { containerName });
 
   // Host gateway
   args.push(...hostGatewayArgs());

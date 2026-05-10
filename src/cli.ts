@@ -19,6 +19,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { spawn, spawnSync } from 'child_process';
 
 import { cancel, intro, isCancel, note, outro, password, select, text } from '@clack/prompts';
@@ -401,24 +402,47 @@ function ensureSetup(): void {
 }
 
 /**
- * If no agent group has been wired yet, run scripts/init-cli-agent.ts to
- * create one bound to the local CLI channel. The script is idempotent
- * (reuses an existing folder), so calling it on subsequent runs is a
- * no-op-ish DB read. Without this, the host daemon starts but `chat`
- * has nowhere to route messages — the user's first attempt fails opaquely.
+ * If the cli/local channel hasn't been wired to an agent group yet, run
+ * scripts/init-cli-agent.ts to create one. The script is idempotent
+ * (reuses an existing folder + DB rows). The truth is the DB, not the
+ * filesystem — a leftover `groups/<name>/` directory from a previous
+ * install is not the same as a wired channel→agent edge.
+ *
+ * Uses a quick read-only SQLite probe: WAL mode means we can read while
+ * the daemon holds the writer.
  */
+function isCliChannelWired(): boolean {
+  const dbPath = path.join(ROOT, 'data', 'v2.db');
+  if (!fs.existsSync(dbPath)) return false;
+  try {
+    const requireFn = createRequire(import.meta.url);
+    const Database = requireFn('better-sqlite3') as typeof import('better-sqlite3');
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    try {
+      const row = db
+        .prepare(
+          `SELECT mga.id AS id
+           FROM messaging_group_agents mga
+           JOIN messaging_groups mg ON mg.id = mga.messaging_group_id
+           WHERE mg.channel_type = 'cli' AND mg.platform_id = 'local'
+           LIMIT 1`,
+        )
+        .get() as { id?: string } | undefined;
+      return !!row?.id;
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    // If the probe itself fails (corrupt db, missing tables on a
+    // pre-migration install), fall through to the init path — it's
+    // idempotent and will create what's missing.
+    void err;
+    return false;
+  }
+}
+
 function ensureCliAgent(env: EnvDict): void {
-  const groupsDir = path.join(ROOT, 'groups');
-  const hasAnyGroup =
-    fs.existsSync(groupsDir) &&
-    fs.readdirSync(groupsDir).some((entry) => {
-      try {
-        return fs.statSync(path.join(groupsDir, entry)).isDirectory();
-      } catch {
-        return false;
-      }
-    });
-  if (hasAnyGroup) return;
+  if (isCliChannelWired()) return;
 
   console.error('▶  Wiring CLI channel to a fresh agent group...');
   const displayName = env.USER_ID || os.userInfo().username || 'operator';
