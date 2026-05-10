@@ -7,6 +7,8 @@
  */
 import fs from 'fs';
 
+import type { McpServerConfig } from './providers/types.js';
+
 const CONFIG_PATH = '/workspace/agent/container.json';
 
 export interface RunnerConfig {
@@ -15,7 +17,16 @@ export interface RunnerConfig {
   groupName: string;
   agentGroupId: string;
   maxMessagesPerPrompt: number;
-  mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
+  /**
+   * Map of MCP server configs. Each value is one of three transport
+   * shapes: stdio (local subprocess), http (remote endpoint), sse
+   * (remote SSE). See providers/types.ts for the full union.
+   *
+   * Hosted MCPs (Notion, GitHub MCP, Linear MCP, ...) are reachable
+   * here without any local server by setting `type: 'http'` with the
+   * vendor's MCP URL + auth headers.
+   */
+  mcpServers: Record<string, McpServerConfig>;
 }
 
 const DEFAULT_MAX_MESSAGES = 10;

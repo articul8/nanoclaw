@@ -53,6 +53,16 @@ export async function createMcpToolBridge(mcpServers: Record<string, McpServerCo
   const tools: BridgedTool[] = [];
 
   for (const [serverName, cfg] of Object.entries(mcpServers)) {
+    // The bridge currently only handles stdio transports (the Claude
+    // SDK handles http/sse natively when the Claude provider is used).
+    // openai / google providers go through this bridge, so for those
+    // we skip remote MCPs with a clear log line. Future: extend bridge
+    // to streamableHttp + sse transports here.
+    const isStdio = !cfg.type || cfg.type === 'stdio';
+    if (!isStdio) {
+      log(`MCP server "${serverName}" uses ${cfg.type} transport — non-Claude providers skip it (Claude SDK handles natively).`);
+      continue;
+    }
     try {
       const transport = new StdioClientTransport({
         command: cfg.command,

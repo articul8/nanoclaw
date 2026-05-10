@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://articul8.ai/a8-claw/registry/manifest.schema.json",
+  "title": "a8-claw extension registry manifest",
+  "description": "Curated catalog of channels, MCPs, tool families, and runtime peers that a8-claw can wire on request. Ships with the runtime; refreshable from a remote URL (future). Each entry declares a three-axis default approval policy that tenant admins can override.",
+  "type": "object",
+  "required": ["version", "entries"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "string", "description": "Manifest schema version, semver-major when breaking." },
+    "updated_at": { "type": "string", "format": "date" },
+    "entries": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Entry" }
+    }
+  },
+  "$defs": {
+    "Entry": {
+      "type": "object",
+      "required": ["id", "type", "name", "category", "description", "default_policy"],
+      "properties": {
+        "id": { "type": "string", "description": "Stable identifier — used by ./a8-claw add <id> and by add_mcp_server registry lookup." },
+        "type": { "enum": ["channel", "mcp_http", "mcp_sse", "mcp_stdio", "tool_family", "runtime_peer"] },
+        "name": { "type": "string", "description": "Human-readable name shown in the picker UI." },
+        "category": { "type": "string", "description": "Grouping for the picker: comms, knowledge, code, issues, data, compute, research, delegation, …" },
+        "description": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "install": {
+          "type": "object",
+          "description": "Type-specific install instructions. channel → adapter source ref + npm package + barrel import. mcp_http/sse → url + header template. mcp_stdio → command/args. tool_family → tool_manager_family or native flag. runtime_peer → runtime_id + dispatch_via.",
+          "additionalProperties": true
+        },
+        "credentials_env": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Env-var names the entry needs at runtime. Resolved from OneCLI vault (mission mode) or .env (standalone). Empty for platform-creded surfaces."
+        },
+        "auth": {
+          "type": "object",
+          "properties": {
+            "kind": { "enum": ["oauth2", "bot_token", "api_token", "github_app", "platform", "none"] },
+            "provider": { "type": "string" },
+            "scopes": { "type": "array", "items": { "type": "string" } },
+            "setup_url": { "type": "string", "format": "uri" },
+            "notes": { "type": "string" }
+          }
+        },
+        "default_policy": {
+          "type": "object",
+          "required": ["install", "invoke"],
+          "properties": {
+            "install": { "$ref": "#/$defs/InstallGate" },
+            "invoke": { "$ref": "#/$defs/InvokePolicy" },
+            "scope": { "$ref": "#/$defs/ScopePolicy" },
+            "expires": { "$ref": "#/$defs/ExpiresPolicy" },
+            "audit_level": { "enum": ["standard", "enhanced"] }
+          }
+        }
+      }
+    },
+    "InstallGate": {
+      "enum": ["auto", "admin", "compliance", "deny"],
+      "description": "auto = pre-vetted, no human gate. admin = single admin DM approval. compliance = compliance officer + enhanced audit. deny = blocked in this tenant's policy."
+    },
+    "InvokePolicy": {
+      "type": "object",
+      "required": ["default"],
+      "properties": {
+        "default": { "enum": ["auto", "per_session", "per_call"] },
+        "scoped": {
+          "type": "object",
+          "additionalProperties": { "enum": ["auto", "per_session", "per_call"] },
+          "description": "Per-operation override. Key = MCP tool name (e.g. 'notion_delete_page'); value overrides 'default'."
+        },
+        "cost_gated_above_cents": {
+          "type": "number",
+          "description": "v2: auto-approve invocations under this cost; prompt above. Requires metering hook integration."
+        }
+      }
+    },
+    "ScopePolicy": {
+      "type": "object",
+      "properties": {
+        "sensitivity": { "enum": ["read_only", "read_write", "destructive"] },
+        "allowed_resources": { "type": "array", "items": { "type": "string" }, "description": "v3: whitelist (e.g. specific workspaces, repos)." },
+        "denied_resources": { "type": "array", "items": { "type": "string" }, "description": "v3: blacklist." }
+      }
+    },
+    "ExpiresPolicy": {
+      "type": "object",
+      "properties": {
+        "session_seconds": { "type": "integer", "description": "Per-session approvals expire after this many seconds." },
+        "absolute_seconds": { "type": "integer", "description": "Tenant-scoped approvals expire after this many seconds since grant." }
+      }
+    }
+  }
+}

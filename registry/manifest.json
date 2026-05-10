@@ -1,0 +1,320 @@
+{
+  "$schema": "./manifest.schema.json",
+  "version": "1",
+  "updated_at": "2026-05-10",
+  "entries": [
+    {
+      "id": "slack",
+      "type": "channel",
+      "name": "Slack",
+      "category": "comms",
+      "description": "Inbound + outbound DMs and channel messages on Slack.",
+      "tags": ["chat", "team", "humans"],
+      "install": {
+        "adapter_branch": "upstream/channels",
+        "adapter_path": "src/channels/slack.ts",
+        "package": "@chat-adapter/slack@4.26.0",
+        "barrel_import": "import './slack.js';"
+      },
+      "credentials_env": ["SLACK_BOT_TOKEN", "SLACK_SIGNING_SECRET"],
+      "auth": { "kind": "oauth2", "provider": "slack", "setup_url": "https://api.slack.com/apps" },
+      "default_policy": {
+        "install": "admin",
+        "invoke": { "default": "auto" },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "telegram",
+      "type": "channel",
+      "name": "Telegram",
+      "category": "comms",
+      "description": "DMs and channel messages on Telegram via bot API.",
+      "tags": ["chat", "humans"],
+      "install": {
+        "adapter_branch": "upstream/channels",
+        "adapter_path": "src/channels/telegram.ts",
+        "package": "@chat-adapter/telegram@4.26.0",
+        "barrel_import": "import './telegram.js';"
+      },
+      "credentials_env": ["TELEGRAM_BOT_TOKEN"],
+      "auth": { "kind": "bot_token", "provider": "telegram", "setup_url": "https://t.me/BotFather" },
+      "default_policy": {
+        "install": "admin",
+        "invoke": { "default": "auto" },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "discord",
+      "type": "channel",
+      "name": "Discord",
+      "category": "comms",
+      "description": "Inbound + outbound messages on Discord guilds and DMs.",
+      "tags": ["chat", "team", "humans"],
+      "install": {
+        "adapter_branch": "upstream/channels",
+        "adapter_path": "src/channels/discord.ts",
+        "package": "@chat-adapter/discord@4.26.0",
+        "barrel_import": "import './discord.js';"
+      },
+      "credentials_env": ["DISCORD_BOT_TOKEN"],
+      "auth": { "kind": "bot_token", "provider": "discord", "setup_url": "https://discord.com/developers/applications" },
+      "default_policy": {
+        "install": "admin",
+        "invoke": { "default": "auto" },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "linear-channel",
+      "type": "channel",
+      "name": "Linear (channel)",
+      "category": "issues",
+      "description": "Chat-style inbound on Linear issues and comments.",
+      "tags": ["issues", "team"],
+      "install": {
+        "adapter_branch": "upstream/channels",
+        "adapter_path": "src/channels/linear.ts",
+        "package": "@chat-adapter/linear@4.26.0",
+        "barrel_import": "import './linear.js';"
+      },
+      "credentials_env": ["LINEAR_API_KEY", "LINEAR_WEBHOOK_SECRET"],
+      "auth": { "kind": "oauth2", "provider": "linear", "setup_url": "https://linear.app/settings/api" },
+      "default_policy": {
+        "install": "admin",
+        "invoke": { "default": "auto" },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "github-channel",
+      "type": "channel",
+      "name": "GitHub (channel)",
+      "category": "code",
+      "description": "Inbound mentions, issue comments, and PR review events as chat.",
+      "tags": ["code", "review"],
+      "install": {
+        "adapter_branch": "upstream/channels",
+        "adapter_path": "src/channels/github.ts",
+        "package": "@chat-adapter/github@4.26.0",
+        "barrel_import": "import './github.js';"
+      },
+      "credentials_env": ["GITHUB_APP_ID", "GITHUB_PRIVATE_KEY", "GITHUB_WEBHOOK_SECRET", "GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"],
+      "auth": { "kind": "github_app", "provider": "github", "setup_url": "https://github.com/settings/apps" },
+      "default_policy": {
+        "install": "admin",
+        "invoke": { "default": "auto", "scoped": { "github_create_pull_request": "per_call", "github_merge_pull_request": "per_call" } },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "teams",
+      "type": "channel",
+      "name": "Microsoft Teams",
+      "category": "comms",
+      "description": "Inbound + outbound chat on Microsoft Teams via Bot Framework.",
+      "tags": ["chat", "team", "humans", "microsoft"],
+      "install": {
+        "adapter_branch": "upstream/channels",
+        "adapter_path": "src/channels/teams.ts",
+        "package": "@chat-adapter/teams@4.26.0",
+        "barrel_import": "import './teams.js';"
+      },
+      "credentials_env": ["TEAMS_APP_ID", "TEAMS_APP_PASSWORD"],
+      "auth": { "kind": "oauth2", "provider": "microsoft", "setup_url": "https://portal.azure.com" },
+      "default_policy": {
+        "install": "admin",
+        "invoke": { "default": "auto" },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "notion",
+      "type": "mcp_http",
+      "name": "Notion",
+      "category": "knowledge",
+      "description": "Search, read, and write Notion pages and databases.",
+      "tags": ["docs", "kb", "search"],
+      "install": {
+        "url": "https://mcp.notion.com/mcp",
+        "headers_from_credentials": { "Authorization": "Bearer ${NOTION_API_KEY}" }
+      },
+      "credentials_env": ["NOTION_API_KEY"],
+      "auth": { "kind": "oauth2", "provider": "notion", "setup_url": "https://www.notion.so/my-integrations" },
+      "default_policy": {
+        "install": "auto",
+        "invoke": {
+          "default": "auto",
+          "scoped": {
+            "notion_delete_page": "per_call",
+            "notion_archive_page": "per_call",
+            "notion_update_database": "per_call"
+          }
+        },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "github-mcp",
+      "type": "mcp_http",
+      "name": "GitHub (MCP)",
+      "category": "code",
+      "description": "Repo browsing, issues, PRs, code search through GitHub's MCP server.",
+      "tags": ["code", "issues", "review"],
+      "install": {
+        "url": "https://api.githubcopilot.com/mcp",
+        "headers_from_credentials": { "Authorization": "Bearer ${GITHUB_MCP_TOKEN}" }
+      },
+      "credentials_env": ["GITHUB_MCP_TOKEN"],
+      "auth": { "kind": "oauth2", "provider": "github", "setup_url": "https://github.com/settings/tokens" },
+      "default_policy": {
+        "install": "auto",
+        "invoke": {
+          "default": "auto",
+          "scoped": {
+            "create_pull_request": "per_call",
+            "merge_pull_request": "per_call",
+            "delete_branch": "per_call",
+            "delete_repository": "per_call"
+          }
+        },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "linear-mcp",
+      "type": "mcp_http",
+      "name": "Linear (MCP)",
+      "category": "issues",
+      "description": "Tool-style access to Linear: search issues, create issues, comment, update status.",
+      "tags": ["issues", "team"],
+      "install": {
+        "url": "https://mcp.linear.app/mcp",
+        "headers_from_credentials": { "Authorization": "Bearer ${LINEAR_MCP_TOKEN}" }
+      },
+      "credentials_env": ["LINEAR_MCP_TOKEN"],
+      "auth": { "kind": "oauth2", "provider": "linear", "setup_url": "https://linear.app/settings/api" },
+      "default_policy": {
+        "install": "auto",
+        "invoke": { "default": "auto", "scoped": { "delete_issue": "per_call" } },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "asana",
+      "type": "mcp_http",
+      "name": "Asana",
+      "category": "issues",
+      "description": "Tasks, projects, and workspaces on Asana via hosted MCP.",
+      "tags": ["tasks", "project"],
+      "install": {
+        "url": "https://mcp.asana.com/sse",
+        "headers_from_credentials": { "Authorization": "Bearer ${ASANA_TOKEN}" }
+      },
+      "credentials_env": ["ASANA_TOKEN"],
+      "auth": { "kind": "oauth2", "provider": "asana", "setup_url": "https://app.asana.com/0/my-apps" },
+      "default_policy": {
+        "install": "auto",
+        "invoke": { "default": "auto", "scoped": { "delete_task": "per_call", "delete_project": "per_call" } },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "atlassian",
+      "type": "mcp_http",
+      "name": "Atlassian (Jira + Confluence)",
+      "category": "issues",
+      "description": "Tickets, projects, pages, spaces across Jira and Confluence.",
+      "tags": ["issues", "docs"],
+      "install": {
+        "url": "https://mcp.atlassian.com/v1/sse",
+        "headers_from_credentials": { "Authorization": "Bearer ${ATLASSIAN_TOKEN}" }
+      },
+      "credentials_env": ["ATLASSIAN_TOKEN"],
+      "auth": { "kind": "oauth2", "provider": "atlassian", "setup_url": "https://id.atlassian.com/manage-profile/security/api-tokens" },
+      "default_policy": {
+        "install": "auto",
+        "invoke": { "default": "auto", "scoped": { "delete_issue": "per_call", "delete_page": "per_call" } },
+        "scope": { "sensitivity": "read_write" }
+      }
+    },
+    {
+      "id": "perception",
+      "type": "tool_family",
+      "name": "Perception (data + document)",
+      "category": "data",
+      "description": "Platform Tool Manager family: document parsing, table extraction, time-series detection, dataframe ops, dim reduction, embeddings, VLM/OCR.",
+      "tags": ["data", "docs", "analysis"],
+      "install": {
+        "tool_manager_family": "perception"
+      },
+      "credentials_env": [],
+      "auth": { "kind": "platform", "provider": "tool_manager", "notes": "platform-creded; no user OAuth" },
+      "default_policy": {
+        "install": "auto",
+        "invoke": { "default": "auto" },
+        "scope": { "sensitivity": "read_only" }
+      }
+    },
+    {
+      "id": "web",
+      "type": "tool_family",
+      "name": "Web (search + fetch)",
+      "category": "research",
+      "description": "WebSearch (Anthropic-native) + WebFetch — public-web information retrieval.",
+      "tags": ["search", "research"],
+      "install": {
+        "tool_manager_family": null,
+        "native": true,
+        "tools": ["WebSearch", "WebFetch"]
+      },
+      "credentials_env": [],
+      "auth": { "kind": "platform", "provider": "anthropic" },
+      "default_policy": {
+        "install": "auto",
+        "invoke": { "default": "auto" },
+        "scope": { "sensitivity": "read_only" }
+      }
+    },
+    {
+      "id": "bash",
+      "type": "tool_family",
+      "name": "Bash (shell)",
+      "category": "compute",
+      "description": "Shell command execution in the per-session container.",
+      "tags": ["compute", "destructive"],
+      "install": {
+        "native": true,
+        "tools": ["Bash"]
+      },
+      "credentials_env": [],
+      "auth": { "kind": "platform" },
+      "default_policy": {
+        "install": "auto",
+        "invoke": { "default": "per_call" },
+        "scope": { "sensitivity": "destructive" }
+      }
+    },
+    {
+      "id": "a8-code",
+      "type": "runtime_peer",
+      "name": "a8-code (autonomous coding peer)",
+      "category": "delegation",
+      "description": "Delegate heavy autonomous work (analysis, multi-file refactor, long-running Python) to a8-code via the mission engine. Result returns as a channel reply.",
+      "tags": ["delegation", "compute", "code", "analysis"],
+      "install": {
+        "runtime_id": "a8-code",
+        "dispatch_via": "mission_engine"
+      },
+      "credentials_env": [],
+      "auth": { "kind": "platform" },
+      "default_policy": {
+        "install": "auto",
+        "invoke": { "default": "auto" },
+        "scope": { "sensitivity": "read_write" },
+        "audit_level": "enhanced"
+      }
+    }
+  ]
+}

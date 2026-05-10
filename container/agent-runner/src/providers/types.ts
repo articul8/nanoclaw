@@ -49,10 +49,44 @@ export interface QueryInput {
   };
 }
 
-export interface McpServerConfig {
+/**
+ * MCP server config — discriminated union over the three transports
+ * the Claude Agent SDK supports.
+ *
+ *   - stdio: local subprocess; the SDK spawns it
+ *   - http: remote HTTP endpoint with optional bearer / custom headers
+ *   - sse:  remote Server-Sent Events endpoint with optional headers
+ *
+ * Hosted MCP servers (Notion, GitHub MCP, Linear MCP, Asana, Atlassian,
+ * Drive, Dropbox) are reachable via `type: 'http'` without any local
+ * server. Wire them by appending an entry to container.json's
+ * `mcpServers` map; the agent-runner passes the config through to
+ * sdkQuery() unchanged.
+ *
+ * `type` is optional on the stdio form for backward compatibility with
+ * existing container.json files written before the union was widened.
+ * Default is `stdio` when `type` is missing AND `command` is set.
+ */
+export type McpServerConfig = McpStdioServerConfig | McpHttpServerConfig | McpSSEServerConfig;
+
+export interface McpStdioServerConfig {
+  type?: 'stdio';
   command: string;
   args: string[];
   env: Record<string, string>;
+}
+
+export interface McpHttpServerConfig {
+  type: 'http';
+  url: string;
+  /** Bearer tokens, custom auth headers, etc. Populated at spawn time from credential vault. */
+  headers?: Record<string, string>;
+}
+
+export interface McpSSEServerConfig {
+  type: 'sse';
+  url: string;
+  headers?: Record<string, string>;
 }
 
 export interface AgentQuery {

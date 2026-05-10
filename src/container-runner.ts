@@ -367,6 +367,16 @@ function buildMounts(
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
 
+  // Extension registry — the in-container loader and the add_mcp_server
+  // registry-aware path read manifest.json from this mount. One source
+  // of truth for both host (./a8-claw add) and container (agent's
+  // add_mcp_server / list_extensions). Future tenant-scoped overlays
+  // would extend this layout with additional readonly files.
+  const registrySrc = path.join(projectRoot, 'registry');
+  if (fs.existsSync(registrySrc)) {
+    mounts.push({ hostPath: registrySrc, containerPath: '/app/registry', readonly: true });
+  }
+
   // Additional mounts from container config
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
