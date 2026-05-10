@@ -3,6 +3,7 @@ import path from 'path';
 
 import { query as sdkQuery, type HookCallback, type PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 
+import { writeMissionEvent } from '../audit.js';
 import { clearContainerToolInFlight, setContainerToolInFlight } from '../db/connection.js';
 import { emitLive } from '../live-render.js';
 import { registerProvider } from './provider-registry.js';
@@ -295,6 +296,14 @@ const preToolUseHook: HookCallback = async (input) => {
   const i = input as { tool_name?: string; tool_input?: Record<string, unknown> };
   const toolName = i.tool_name ?? '';
   if (SDK_DISALLOWED_TOOLS.includes(toolName)) {
+    // Audit the rejection so the trail captures *why* the agent's call
+    // was blocked (not just that it didn't happen). Useful for debugging
+    // a stuck agent or proving an attempted-but-blocked action.
+    void writeMissionEvent({
+      event_kind: 'tool_call',
+      payload: { tool_name: toolName, success: false, blocked: true },
+      rationale: `Blocked: tool '${toolName}' is not available in this environment.`,
+    });
     return {
       decision: 'block',
       stopReason: `Tool '${toolName}' is not available in this environment — use the nanoclaw equivalent.`,
@@ -309,16 +318,47 @@ const preToolUseHook: HookCallback = async (input) => {
   } catch (err) {
     log(`PreToolUse: failed to record container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Audit the tool call (success TBD, will be updated by PostToolUse).
+  // Record latency timestamp so the post-hook can compute latency_ms per
+  // contract §4.3. We stash the start-time on a module-level Map keyed
+  // by tool_use_id.
+  const toolUseId = (i as { tool_use_id?: string }).tool_use_id;
+  if (toolUseId) {
+    toolStartTimes.set(toolUseId, Date.now());
+  }
   return { continue: true };
 };
 
-/** Clear in-flight tool on PostToolUse / PostToolUseFailure. */
-const postToolUseHook: HookCallback = async () => {
+/** Track tool start times for latency_ms in the post-use audit event. */
+const toolStartTimes = new Map<string, number>();
+
+/** Clear in-flight tool on PostToolUse / PostToolUseFailure + audit. */
+const postToolUseHook: HookCallback = async (input) => {
   try {
     clearContainerToolInFlight();
   } catch (err) {
     log(`PostToolUse: failed to clear container_state: ${err instanceof Error ? err.message : String(err)}`);
   }
+  // Audit the completion with success + latency.
+  const i = input as {
+    tool_name?: string;
+    tool_use_id?: string;
+    tool_response?: { is_error?: boolean };
+  };
+  const toolName = i.tool_name ?? '';
+  const toolUseId = i.tool_use_id;
+  const startedAt = toolUseId ? toolStartTimes.get(toolUseId) : undefined;
+  const latencyMs = startedAt ? Date.now() - startedAt : null;
+  if (toolUseId) toolStartTimes.delete(toolUseId);
+  const success = !i.tool_response?.is_error;
+  void writeMissionEvent({
+    event_kind: 'tool_call',
+    payload: {
+      tool_name: toolName,
+      success,
+      ...(latencyMs != null ? { latency_ms: latencyMs } : {}),
+    },
+  });
   return { continue: true };
 };
 
@@ -484,7 +524,23 @@ export class ClaudeProvider implements AgentProvider {
           yield { type: 'result', text: `Context compacted${detail}.` };
         } else if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
           const tn = message as { summary?: string };
-          yield { type: 'progress', message: tn.summary || 'Task notification' };
+          const intent = tn.summary || 'Task notification';
+          // Surface SDK task notifications as narration so the user sees
+          // the same "going to do X, then Y" pre-action transparency
+          // Claude Code provides natively. Category 'sdk' lets the
+          // renderer/audit distinguish these from agent-authored intents
+          // (which the agent emits via prose text in its replies).
+          // Mission-event-kind doesn't have a perfect mapping; closest is
+          // `heartbeat` (presence signal), but with a rationale payload
+          // the trail captures the agent's stated plan.
+          emitLive({ type: 'narration', intent, category: 'sdk' });
+          void writeMissionEvent({
+            event_kind: 'heartbeat',
+            payload: { source: 'sdk_task_notification' },
+            rationale: intent,
+            narration_category: 'sdk',
+          });
+          yield { type: 'progress', message: intent };
         }
       }
       // End-of-turn marker on the live channel so the REPL knows to

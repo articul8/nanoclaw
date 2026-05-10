@@ -106,8 +106,21 @@ export interface OutboundMessage {
  * (see container/agent-runner/src/live-render.ts) so the host can
  * `JSON.parse` a line and pass the result straight to deliverLive().
  */
+/** See container/agent-runner/src/live-render.ts for the canonical definition. */
+export type LiveEventNarrationCategory =
+  | 'plan'
+  | 'tool'
+  | 'delegate'
+  | 'install'
+  | 'approval'
+  | 'route'
+  | 'memory'
+  | 'tier'
+  | 'sdk';
+
 export type LiveEvent =
   | { type: 'text'; text: string }
+  | { type: 'narration'; intent: string; category: LiveEventNarrationCategory }
   | { type: 'tool_call'; name: string; input?: unknown }
   | { type: 'tool_result'; name: string; ok: boolean; summary?: string }
   | { type: 'done' };

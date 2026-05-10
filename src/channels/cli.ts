@@ -39,7 +39,14 @@ import path from 'path';
 
 import { DATA_DIR } from '../config.js';
 import { log } from '../log.js';
-import type { ChannelAdapter, ChannelSetup, DeliveryAddress, InboundEvent, LiveEvent, OutboundMessage } from './adapter.js';
+import type {
+  ChannelAdapter,
+  ChannelSetup,
+  DeliveryAddress,
+  InboundEvent,
+  LiveEvent,
+  OutboundMessage,
+} from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 const PLATFORM_ID = 'local';
@@ -157,11 +164,20 @@ function createAdapter(): ChannelAdapter {
         if (event.type === 'text') {
           liveTurnRendered = true;
           client.write(JSON.stringify({ partial: true, text: event.text }) + '\n');
+        } else if (event.type === 'narration') {
+          // Narration is pre-action transparency — render before the
+          // action lands. Doesn't set liveTurnRendered: it shouldn't
+          // suppress the audit-batch reply on its own (some turns may
+          // be all narration + final batch with no streamed answer
+          // text, e.g. a refusal path).
+          client.write(JSON.stringify({ kind: 'narration', intent: event.intent, category: event.category }) + '\n');
         } else if (event.type === 'tool_call') {
           liveTurnRendered = true;
           client.write(JSON.stringify({ kind: 'tool_call', name: event.name, input: event.input }) + '\n');
         } else if (event.type === 'tool_result') {
-          client.write(JSON.stringify({ kind: 'tool_result', name: event.name, ok: event.ok, summary: event.summary }) + '\n');
+          client.write(
+            JSON.stringify({ kind: 'tool_result', name: event.name, ok: event.ok, summary: event.summary }) + '\n',
+          );
         } else if (event.type === 'done') {
           // liveTurnRendered stays true until the audit deliver consumes
           // it — that's how we suppress the duplicate batch render.

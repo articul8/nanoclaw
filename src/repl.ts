@@ -119,10 +119,39 @@ export async function ensureDaemon(): Promise<{ started: boolean; pid?: number }
  * already covered the turn.
  */
 type ReplyFrame =
+  | { kind?: 'narration'; intent: string; category: string }
   | { kind?: 'tool_call'; name: string; input?: unknown }
   | { kind?: 'tool_result'; name: string; ok: boolean; summary?: string }
   | { kind?: 'done' }
   | { partial?: boolean; text: string };
+
+/**
+ * Narration category → display glyph. The glyph carries semantic weight
+ * (▸ generic intent, ⇢ delegation, + install, ⚐ approval, ↻ route, …
+ * memory, ↑ tier) so a reader scanning the transcript can pick out
+ * structural decisions from routine tool announcements at a glance.
+ */
+function narrationGlyph(category: string): string {
+  switch (category) {
+    case 'delegate':
+      return '⇢';
+    case 'install':
+      return '+';
+    case 'approval':
+      return '⚐';
+    case 'route':
+      return '↻';
+    case 'memory':
+      return '…';
+    case 'tier':
+      return '↑';
+    case 'tool':
+    case 'sdk':
+    case 'plan':
+    default:
+      return '▸';
+  }
+}
 
 interface SocketReader {
   onFrame(handler: (frame: ReplyFrame) => void): void;
@@ -309,7 +338,17 @@ export async function runOneShot(text: string): Promise<number> {
         firstReplyTimer = null;
       }
       if ('kind' in frame && frame.kind) {
-        if (frame.kind === 'tool_call') {
+        if (frame.kind === 'narration') {
+          if (lineDirty) {
+            process.stdout.write('\n');
+            lineDirty = false;
+          }
+          // Italic+dim with a category glyph — visually quieter than
+          // the substantive answer text but legible enough that a user
+          // scanning the transcript can spot decisions and rationale.
+          const glyph = narrationGlyph(frame.category);
+          process.stdout.write(kleur.italic(kleur.dim(`${glyph} ${frame.intent}`)) + '\n');
+        } else if (frame.kind === 'tool_call') {
           if (lineDirty) {
             process.stdout.write('\n');
             lineDirty = false;
@@ -442,7 +481,10 @@ const HISTORY_MAX = 1000;
 function loadReplHistory(): string[] {
   try {
     const raw = fs.readFileSync(HISTORY_FILE, 'utf8');
-    const lines = raw.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+    const lines = raw
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
     // readline expects newest-first.
     return lines.slice(-HISTORY_MAX).reverse();
   } catch {
@@ -501,7 +543,15 @@ export async function runRepl(): Promise<number> {
     lastActivity = Date.now();
 
     if ('kind' in frame && frame.kind) {
-      if (frame.kind === 'tool_call') {
+      if (frame.kind === 'narration') {
+        if (lineDirty) {
+          process.stdout.write('\n');
+          lineDirty = false;
+        }
+        const glyph = narrationGlyph(frame.category);
+        process.stdout.write(kleur.italic(kleur.dim(`${glyph} ${frame.intent}`)) + '\n');
+        return;
+      } else if (frame.kind === 'tool_call') {
         if (lineDirty) {
           process.stdout.write('\n');
           lineDirty = false;

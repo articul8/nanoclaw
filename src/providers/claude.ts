@@ -43,6 +43,18 @@ registerProviderContainerConfig('claude', (ctx) => {
   if (ctx.hostEnv.TENANT_ID) env.TENANT_ID = ctx.hostEnv.TENANT_ID;
   if (ctx.hostEnv.USER_ID) env.USER_ID = ctx.hostEnv.USER_ID;
 
+  // Agent identity — used by the audit ledger to attribute each event to
+  // the agent that produced it (runtime contract §4 row.agent_id). The
+  // host has the agent_group_id at spawn time; pass it through so audit
+  // rows aren't anonymous.
+  if (ctx.agentGroupId) env.AGENT_ID = ctx.agentGroupId;
+  env.AGENT_TYPE = 'a8-claw';
+  // MISSION_ID flips audit from local-jsonl fallback to platform-ledger
+  // POST — only present when this session was dispatched from the
+  // mission engine, not for direct CLI usage.
+  if (ctx.hostEnv.MISSION_ID) env.MISSION_ID = ctx.hostEnv.MISSION_ID;
+  if (ctx.hostEnv.PARENT_AGENT_ID) env.PARENT_AGENT_ID = ctx.hostEnv.PARENT_AGENT_ID;
+
   // Connection state — runtime-side gates check this for incognito mode.
   if (ctx.hostEnv.CONNECTION_STATE) env.CONNECTION_STATE = ctx.hostEnv.CONNECTION_STATE;
 
