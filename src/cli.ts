@@ -583,15 +583,35 @@ async function cmdConnect(): Promise<void> {
 }
 
 async function cmdChat(args: string[]): Promise<void> {
-  const msg = args.join(' ');
-  if (!msg) {
-    console.error('Usage: a8-claw chat <message>');
+  await ensureAffirmation();
+  // Configure if no .env yet — chat with no setup is a non-starter.
+  if (!fs.existsSync(ENV_PATH)) {
+    console.error('▶  No .env yet — running first-time configure');
+    await configure();
+  }
+  const env = readEnv();
+  const errors = validateEnv(env);
+  if (errors.length > 0) {
+    console.error('✗  .env is incomplete:');
+    for (const e of errors) console.error(`    ${e}`);
+    console.error('   Re-run:  ./a8-claw --configure');
     process.exit(1);
   }
-  await ensureAffirmation();
-  const env = readEnv();
   loadIntoProcessEnv(env);
-  process.exit(run('pnpm', ['chat', msg]));
+  // Make sure the daemon will have a CLI agent wired when it boots.
+  ensureDeps();
+  ensureBuild();
+  ensureSetup();
+  ensureCliAgent(env);
+
+  // Lazy import — keeps repl.ts off the hot path of other subcommands.
+  const { runOneShot, runRepl } = await import('./repl.js');
+  const msg = args.join(' ').trim();
+  if (msg) {
+    process.exit(await runOneShot(msg));
+  } else {
+    process.exit(await runRepl());
+  }
 }
 
 async function cmdSetup(): Promise<void> {
