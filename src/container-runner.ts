@@ -377,6 +377,17 @@ function buildMounts(
     mounts.push({ hostPath: registrySrc, containerPath: '/app/registry', readonly: true });
   }
 
+  // Platform MCP library (`@articul8/platform-mcp`) — bundled in-runtime
+  // federation library that exposes every Articul8 platform service
+  // (Warp, Model Manager, Tool Manager, AgentMesh, PromptHub) as MCP
+  // tools. The container's MCP servers map launches its stdio entrypoint
+  // (see groups/<group>/container.json). Lives in the parent agentmesh
+  // repo at `<repo>/../platform-mcp/`. See ADR-a7c91e3f.
+  const platformMcpSrc = path.resolve(projectRoot, '..', 'platform-mcp');
+  if (fs.existsSync(platformMcpSrc)) {
+    mounts.push({ hostPath: platformMcpSrc, containerPath: '/app/platform-mcp', readonly: true });
+  }
+
   // Additional mounts from container config
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
