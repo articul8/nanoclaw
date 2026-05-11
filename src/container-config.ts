@@ -14,14 +14,37 @@ import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
 
-export interface McpServerConfig {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
+/**
+ * MCP server entry in container.json's mcpServers map. Discriminated
+ * union mirroring the container-side type (see
+ * container/agent-runner/src/providers/types.ts) so the host can write
+ * stdio / http / sse entries and the agent-runner reads them back
+ * unchanged.
+ */
+export type McpServerConfig = (McpStdioConfig | McpHttpConfig | McpSseConfig) & {
   // Optional always-in-context guidance. When set, the host writes the
   // content to `.claude-fragments/mcp-<name>.md` at spawn and imports it
   // into the composed CLAUDE.md.
   instructions?: string;
+};
+
+export interface McpStdioConfig {
+  type?: 'stdio';
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export interface McpHttpConfig {
+  type: 'http';
+  url: string;
+  headers?: Record<string, string>;
+}
+
+export interface McpSseConfig {
+  type: 'sse';
+  url: string;
+  headers?: Record<string, string>;
 }
 
 export interface AdditionalMountConfig {

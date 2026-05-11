@@ -11,7 +11,7 @@
  * add_mcp_server: kill container only — bun runs TS directly, so a pure
  *   MCP wiring change needs nothing more than a process restart.
  */
-import { updateContainerConfig } from '../../container-config.js';
+import { updateContainerConfig, type McpServerConfig } from '../../container-config.js';
 import { buildAgentGroupImage, killContainer } from '../../container-runner.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { log } from '../../log.js';
@@ -83,3 +83,97 @@ export const applyAddMcpServer: ApprovalHandler = async ({ session, payload, use
   notify(`MCP server "${payload.name}" added. Your container will restart with it on the next message.`);
   log.info('MCP server add approved', { agentGroupId: session.agent_group_id, userId });
 };
+
+/**
+ * Apply a registry-resolved MCP entry. Handles all three transports
+ * (mcp_http / mcp_sse / mcp_stdio) by reading `entry.install` and
+ * producing the right McpServerConfig shape. Header / env template
+ * substitution: ${ENV_VAR} placeholders are filled from process.env
+ * (host-side; the secrets get baked into the container.json that the
+ * container mounts RO — future v2 will resolve from OneCLI vault at
+ * spawn time instead so secrets don't sit on disk).
+ *
+ * For mcp_http / mcp_sse — appended verbatim with type and headers.
+ * For mcp_stdio — command + args + env baked from install info.
+ * For non-MCP types (channel, tool_family, runtime_peer) — return a
+ * specific error: those go through their own install paths, not the
+ * container.json mcpServers map. The agent shouldn't have routed them
+ * here, but defense-in-depth.
+ */
+export const applyAddMcpServerFromRegistry: ApprovalHandler = async ({ session, payload, userId, notify }) => {
+  const agentGroup = getAgentGroup(session.agent_group_id);
+  if (!agentGroup) {
+    notify('add_mcp_server_from_registry approved but agent group missing.');
+    return;
+  }
+  const entry = payload.entry as RegistryEntryShape | undefined;
+  const registryId = payload.registry_id as string | undefined;
+  if (!entry || !registryId) {
+    notify('add_mcp_server_from_registry: entry / registry_id missing in payload.');
+    return;
+  }
+  if (entry.type !== 'mcp_http' && entry.type !== 'mcp_sse' && entry.type !== 'mcp_stdio') {
+    notify(
+      `"${entry.name}" is a ${entry.type}, not an MCP server — it needs its own install path (channel install / tool family enable / runtime-peer wire), not container.json mcpServers.`,
+    );
+    log.warn('add_mcp_server_from_registry: non-MCP entry routed here', { registry_id: registryId, type: entry.type });
+    return;
+  }
+
+  const cfg = buildMcpConfigFromEntry(entry, process.env);
+  updateContainerConfig(agentGroup.folder, (containerCfg) => {
+    // buildMcpConfigFromEntry returns the union shape; the
+    // container-config typedef accepts the same union (see
+    // src/container-config.ts).
+    containerCfg.mcpServers[registryId] = cfg as unknown as McpServerConfig;
+  });
+
+  killContainer(session.id, `registry mcp added: ${registryId}`);
+  notify(`${entry.name} wired (${entry.type}). Your container will restart with it on the next message.`);
+  log.info('MCP server (registry) applied', { agentGroupId: session.agent_group_id, registryId, type: entry.type, userId });
+};
+
+/** Minimal local shape — keeps this file independent of the host registry types module. */
+interface RegistryEntryShape {
+  id: string;
+  type: 'channel' | 'mcp_http' | 'mcp_sse' | 'mcp_stdio' | 'tool_family' | 'runtime_peer';
+  name: string;
+  install: Record<string, unknown>;
+  credentials_env?: string[];
+}
+
+function buildMcpConfigFromEntry(entry: RegistryEntryShape, env: NodeJS.ProcessEnv): Record<string, unknown> {
+  const install = entry.install;
+  if (entry.type === 'mcp_http' || entry.type === 'mcp_sse') {
+    const headers: Record<string, string> = {
+      ...((install.static_headers as Record<string, string>) ?? {}),
+      ...substituteHeaderTemplate((install.headers_from_credentials as Record<string, string>) ?? {}, env),
+    };
+    return {
+      type: entry.type === 'mcp_http' ? 'http' : 'sse',
+      url: install.url as string,
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    };
+  }
+  // mcp_stdio
+  return {
+    type: 'stdio',
+    command: install.command as string,
+    args: (install.args as string[]) ?? [],
+    env: substituteEnvTemplate((install.env_from_credentials as Record<string, string>) ?? {}, env),
+  };
+}
+
+/** Replace `${FOO}` placeholders in header values with process.env.FOO. */
+function substituteHeaderTemplate(tpl: Record<string, string>, env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(tpl)) {
+    out[k] = v.replace(/\$\{([A-Z0-9_]+)\}/g, (_, varName: string) => env[varName] ?? '');
+  }
+  return out;
+}
+
+/** Same as header substitution but for env-var maps used by stdio MCPs. */
+function substituteEnvTemplate(tpl: Record<string, string>, env: NodeJS.ProcessEnv): Record<string, string> {
+  return substituteHeaderTemplate(tpl, env);
+}

@@ -14,6 +14,7 @@
  */
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { log } from '../../log.js';
+import type { RegistryEntry } from '../../registry/types.js';
 import type { Session } from '../../types.js';
 import { notifyAgent, requestApproval } from '../approvals/index.js';
 
@@ -60,6 +61,78 @@ export async function handleInstallPackages(content: Record<string, unknown>, se
     payload: { apt, npm, reason },
     title: 'Install Packages Request',
     question: `Agent "${agentGroup.name}" is attempting to install a package + rebuild container:\n${packageList}${reason ? `\nReason: ${reason}` : ''}`,
+  });
+}
+
+/**
+ * Registry-aware add_mcp_server. The container's MCP tool already
+ * resolved the registry entry (passed through verbatim as `entry`)
+ * and decided `auto` vs admin via entry.default_policy.install. For
+ * `auto` we apply immediately without an approval card; for admin /
+ * compliance we still queue the existing approval flow.
+ */
+export async function handleAddMcpServerFromRegistry(
+  content: Record<string, unknown>,
+  session: Session,
+): Promise<void> {
+  const agentGroup = getAgentGroup(session.agent_group_id);
+  if (!agentGroup) {
+    notifyAgent(session, 'add_mcp_server_from_registry failed: agent group not found.');
+    return;
+  }
+  const entry = content.entry as RegistryEntry | undefined;
+  const registryId = content.registry_id as string | undefined;
+  if (!entry || !registryId) {
+    notifyAgent(session, 'add_mcp_server_from_registry failed: entry / registry_id missing.');
+    return;
+  }
+  const auto = content.auto === true;
+  if (auto) {
+    // Direct apply — no approval card. The agent already narrated this.
+    // We import the apply handler lazily to dodge a circular dep with
+    // the approvals module.
+    const { applyAddMcpServerFromRegistry } = await import('./apply.js');
+    await applyAddMcpServerFromRegistry({
+      session,
+      payload: { entry, registry_id: registryId },
+      userId: 'system',
+      notify: (msg) => notifyAgent(session, msg),
+    });
+    return;
+  }
+  await requestApproval({
+    session,
+    agentName: agentGroup.name,
+    action: 'add_mcp_server_from_registry',
+    payload: { entry, registry_id: registryId },
+    title: 'Add Extension Request',
+    question: `Agent "${agentGroup.name}" is asking to wire ${entry.name} (${entry.type}). Policy gate: ${entry.default_policy.install}.\n${entry.description}`,
+  });
+}
+
+/**
+ * Free-text registry-miss request — the agent asked for something not
+ * in the catalog. Files a pending_extensions row + DMs admin so the
+ * operator can vet and add a registry entry (or reject).
+ */
+export async function handleRequestExtension(content: Record<string, unknown>, session: Session): Promise<void> {
+  const agentGroup = getAgentGroup(session.agent_group_id);
+  if (!agentGroup) {
+    notifyAgent(session, 'request_extension failed: agent group not found.');
+    return;
+  }
+  await requestApproval({
+    session,
+    agentName: agentGroup.name,
+    action: 'request_extension',
+    payload: {
+      name: content.name,
+      type: content.type,
+      url_or_command: content.url_or_command,
+      why: content.why,
+    },
+    title: 'New Extension Request',
+    question: `Agent "${agentGroup.name}" is asking to add a NEW extension that isn't in the registry:\n- name: ${content.name}\n- type: ${content.type}\n- url/command: ${content.url_or_command || '(not provided)'}\n- why: ${content.why}`,
   });
 }
 
