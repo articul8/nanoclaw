@@ -488,25 +488,50 @@ async function cmdStart(): Promise<void> {
   // Propagate so the runtime + auth layer can read it.
   process.env.CONNECTION_STATE = connState;
 
-  console.error('');
-  console.error(`✓  a8-claw starting`);
-  if (connState === 'incognito') {
-    console.error(`   ${kleur.magenta('INCOGNITO')}  ${kleur.dim('chat-only; no platform calls; nothing recorded')}`);
-  } else if (connState === 'offline') {
-    console.error(
-      `   ${kleur.yellow('OFFLINE')}  identity=${env.TENANT_ID} / ${env.USER_ID}  ${kleur.dim('(local placeholder)')}`,
-    );
-    console.error(`   ${kleur.dim('Platform features pending.  Run ./a8-claw connect to authenticate.')}`);
-  } else {
-    console.error(`   ${kleur.green('connected')}  ${env.TENANT_ID} / ${env.USER_ID}`);
+  // Bare `./a8-claw` is the everyday entry point — the user wants a chat
+  // REPL, not a tail of daemon logs. Defer to cmdChat which supervises
+  // the daemon in the background and drops us straight into the REPL.
+  // For an explicit foreground daemon (debugging, systemd), use
+  // `./a8-claw daemon` (handled in main()).
+  await cmdChat([]);
+}
+
+/**
+ * Foreground daemon — old `cmdStart` behavior. Useful when you want to
+ * see live logs without going through data/daemon.log, or for service
+ * managers (launchd / systemd) that expect a foreground process.
+ *
+ * Most users should NOT call this directly — `./a8-claw` and
+ * `./a8-claw chat` auto-supervise the daemon and drop you into a REPL.
+ */
+async function cmdDaemonForeground(): Promise<void> {
+  await ensureAffirmation();
+  if (!fs.existsSync(ENV_PATH)) {
+    console.error('▶  No .env yet — running first-time configure');
+    await configure();
   }
-  console.error(
-    `   route=${env.MAIN_MODEL_ROUTE ?? 'direct'}  provider=${env.MAIN_MODEL_PROVIDER ?? 'anthropic'}  model=${env.DEFAULT_LLM_MODEL ?? 'claude-sonnet-4-6'}`,
-  );
-  console.error(`   warp=${env.WARP_URL}`);
-  console.error(`   model_manager=${env.MODEL_MANAGER_URL}`);
+  const env = readEnv();
+  const errors = validateEnv(env);
+  if (errors.length > 0) {
+    console.error('✗  .env is incomplete:');
+    for (const e of errors) console.error(`    ${e}`);
+    console.error('   Re-run:  ./a8-claw --configure');
+    process.exit(1);
+  }
+  loadIntoProcessEnv(env);
+  ensureDeps();
+  ensureBuild();
+  ensureSetup();
+  ensureCliAgent(env);
+
+  const flagIncognito = process.argv.includes('--incognito');
+  let connState = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
+  if (flagIncognito) connState = 'incognito';
+  process.env.CONNECTION_STATE = connState;
+
   console.error('');
-  console.error(`   In another terminal:  ./a8-claw chat 'hello'`);
+  console.error(`✓  a8-claw daemon starting (foreground)`);
+  console.error(`   ${kleur.dim('logs live in this terminal — Ctrl-C to stop')}`);
   console.error('');
 
   const child = spawn('pnpm', ['dev'], { cwd: ROOT, stdio: 'inherit', env: process.env });
@@ -717,16 +742,20 @@ function printHelp(): void {
   const help = `a8-claw — AgentMesh conversational runtime launcher
 
 Usage:
-  a8-claw                       Start the host (first-run: onboarding → configure → start)
-  a8-claw --incognito           Start in INCOGNITO mode for this run only
-  a8-claw chat MESSAGE          Send a chat message via local CLI socket
-  a8-claw configure             Interactive configuration of provider, key, model, privacy
+  a8-claw                       Open a chat REPL (first-run: onboarding → configure)
+  a8-claw chat                  Same — open the REPL
+  a8-claw chat MESSAGE          One-shot: send a message and print the reply
+  a8-claw --incognito           Open the REPL in INCOGNITO mode for this run
+  a8-claw configure             Interactive configuration (provider, key, model, privacy)
   a8-claw --configure           Same, as a flag
   a8-claw connect               Authenticate with the AgentMesh platform
   a8-claw revoke-affirmation    Clear the signed affirmation; next start re-onboards
   a8-claw setup                 Run nanoclaw setup (DB init, container build)
   a8-claw build                 Build TypeScript
   a8-claw status                Show health, connection state, affirmation status
+  a8-claw add [id]              Browse / install extensions (channels, MCPs, tools)
+  a8-claw list [category]       Show installed + available extensions
+  a8-claw daemon                Run the host daemon in the foreground (debugging only)
   a8-claw -h | --help           Show this help
 
 Privacy modes (set during configure):
@@ -781,6 +810,20 @@ async function main(): Promise<void> {
     case 'status':
       await cmdStatus();
       break;
+    case 'daemon':
+      await cmdDaemonForeground();
+      break;
+    case 'add': {
+      const { cmdAdd } = await import('./cli-add.js');
+      await cmdAdd(args.slice(1));
+      break;
+    }
+    case 'list':
+    case 'ls': {
+      const { cmdList } = await import('./cli-add.js');
+      await cmdList(args.slice(1));
+      break;
+    }
     default:
       console.error(`Unknown command: ${cmd}`);
       printHelp();

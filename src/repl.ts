@@ -28,6 +28,7 @@ import { fileURLToPath } from 'url';
 
 import kleur from 'kleur';
 
+import { countDisplayLines, hasBlockMarkdown, renderMarkdown } from './markdown-render.js';
 import { readAffirmation, SCREEN_RESPONSIBILITY, SCREEN_SECURITY, SCREEN_WHEN } from './onboarding.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -288,9 +289,42 @@ export async function runOneShot(text: string): Promise<number> {
     let firstReplyTimer: NodeJS.Timeout | null = null;
     let turnHardTimer: NodeJS.Timeout | null = null;
     let lineDirty = false; // true when the current line has unflushed live text
+    // Streamed-text buffer for end-of-turn markdown redraw. Reset on
+    // any non-text frame (tool_call / tool_result / narration) since
+    // those break the answer into segments and we only want to redraw
+    // the final answer block, not the whole turn.
+    let answerBuffer = '';
     const tools = makeToolRenderer((dirty) => {
       lineDirty = dirty;
     });
+
+    const maybeRedrawAsMarkdown = (): void => {
+      if (!answerBuffer) return;
+      if (!process.stdout.isTTY) return; // piped output: no cursor-up
+      if (!hasBlockMarkdown(answerBuffer)) return;
+      const cols = process.stdout.columns ?? 100;
+      const linesUsed = countDisplayLines(answerBuffer, cols);
+      if (linesUsed <= 0) return;
+      try {
+        const polished = renderMarkdown(answerBuffer);
+        // Move cursor up over the streamed answer and clear to end of
+        // screen. \x1B[<n>A = cursor up n; \x1B[J = clear from cursor
+        // to end of display. If the answer scrolled past terminal
+        // height some lines were lost — the redraw still lands at the
+        // right column, but lines that scrolled off won't come back
+        // (acceptable: those were already raw, user can still see
+        // formatted output in scrollback).
+        process.stdout.write(`\x1B[${linesUsed}A\x1B[J`);
+        process.stdout.write(polished);
+      } catch {
+        // Renderer failed (malformed mid-stream markdown, etc.) —
+        // leave streamed raw text in place. No-op.
+      }
+    };
+
+    const resetAnswerBuffer = (): void => {
+      answerBuffer = '';
+    };
 
     const exit = (code: number): void => {
       if (silenceTimer) clearTimeout(silenceTimer);
@@ -343,9 +377,10 @@ export async function runOneShot(text: string): Promise<number> {
             process.stdout.write('\n');
             lineDirty = false;
           }
-          // Italic+dim with a category glyph — visually quieter than
-          // the substantive answer text but legible enough that a user
-          // scanning the transcript can spot decisions and rationale.
+          // Narration breaks the answer flow — drop the accumulating
+          // markdown buffer so the eventual redraw only covers what
+          // streamed AFTER this point.
+          resetAnswerBuffer();
           const glyph = narrationGlyph(frame.category);
           process.stdout.write(kleur.italic(kleur.dim(`${glyph} ${frame.intent}`)) + '\n');
         } else if (frame.kind === 'tool_call') {
@@ -353,23 +388,23 @@ export async function runOneShot(text: string): Promise<number> {
             process.stdout.write('\n');
             lineDirty = false;
           }
+          // Tool call also breaks the answer flow — start counting
+          // again from after the tool result completes.
+          resetAnswerBuffer();
           tools.onCall(frame.name, frame.input);
-          // Tool call started — agent will be busy for a while (web
-          // search, bash, etc.). Cancel any silence timer so we don't
-          // bail mid-tool. The `done` event will trigger exit.
           if (silenceTimer) {
             clearTimeout(silenceTimer);
             silenceTimer = null;
           }
         } else if (frame.kind === 'tool_result') {
           tools.onResult(frame.ok, frame.summary);
+          resetAnswerBuffer();
         } else if (frame.kind === 'done') {
           if (lineDirty) {
             process.stdout.write('\n');
             lineDirty = false;
           }
-          // Authoritative end-of-turn — exit immediately rather than
-          // waiting for the silence timer.
+          maybeRedrawAsMarkdown();
           exit(0);
         }
         return;
@@ -377,16 +412,27 @@ export async function runOneShot(text: string): Promise<number> {
       // Text frame — partial or batch.
       const f = frame as { partial?: boolean; text: string };
       if (f.partial) {
+        answerBuffer += f.text;
         process.stdout.write(f.text);
         lineDirty = !f.text.endsWith('\n');
-        // Don't arm silence on partial text — we're mid-stream. Wait for
-        // `done` (or a long quiet from a non-live channel).
       } else {
         if (lineDirty) {
           process.stdout.write('\n');
           lineDirty = false;
         }
-        process.stdout.write(f.text + '\n');
+        // Batch text frame (no live render fired this turn — fallback
+        // path for non-streaming channels). Render through markdown
+        // pipeline if it has block structure.
+        const finalText = f.text;
+        if (process.stdout.isTTY && hasBlockMarkdown(finalText)) {
+          try {
+            process.stdout.write(renderMarkdown(finalText));
+          } catch {
+            process.stdout.write(finalText + '\n');
+          }
+        } else {
+          process.stdout.write(finalText + '\n');
+        }
         armSilence();
       }
     });
@@ -525,6 +571,7 @@ export async function runRepl(): Promise<number> {
   const QUIET_MS = 1_500;
 
   let lineDirty = false;
+  let answerBuffer = '';
   const tools = makeToolRenderer((dirty) => {
     lineDirty = dirty;
   });
@@ -539,6 +586,22 @@ export async function runRepl(): Promise<number> {
     rl.prompt();
   }
 
+  function maybeRedrawAsMarkdown(): void {
+    if (!answerBuffer) return;
+    if (!process.stdout.isTTY) return;
+    if (!hasBlockMarkdown(answerBuffer)) return;
+    const cols = process.stdout.columns ?? 100;
+    const linesUsed = countDisplayLines(answerBuffer, cols);
+    if (linesUsed <= 0) return;
+    try {
+      const polished = renderMarkdown(answerBuffer);
+      process.stdout.write(`\x1B[${linesUsed}A\x1B[J`);
+      process.stdout.write(polished);
+    } catch {
+      // Renderer failed — keep streamed raw text in place.
+    }
+  }
+
   reader.onFrame((frame) => {
     lastActivity = Date.now();
 
@@ -548,6 +611,7 @@ export async function runRepl(): Promise<number> {
           process.stdout.write('\n');
           lineDirty = false;
         }
+        answerBuffer = '';
         const glyph = narrationGlyph(frame.category);
         process.stdout.write(kleur.italic(kleur.dim(`${glyph} ${frame.intent}`)) + '\n');
         return;
@@ -556,6 +620,7 @@ export async function runRepl(): Promise<number> {
           process.stdout.write('\n');
           lineDirty = false;
         }
+        answerBuffer = '';
         tools.onCall(frame.name, frame.input);
         // Tool work in progress — cancel the quiet timer so we don't
         // re-prompt mid-tool. `done` (or text frames) will rearm it.
@@ -566,22 +631,22 @@ export async function runRepl(): Promise<number> {
         return;
       } else if (frame.kind === 'tool_result') {
         tools.onResult(frame.ok, frame.summary);
+        answerBuffer = '';
       } else if (frame.kind === 'done') {
         if (lineDirty) {
           process.stdout.write('\n');
           lineDirty = false;
         }
-        // Authoritative end-of-turn — re-prompt immediately rather than
-        // waiting for the quiet timer.
+        maybeRedrawAsMarkdown();
+        answerBuffer = '';
         rePrompt();
         return;
       }
     } else {
       const f = frame as { partial?: boolean; text: string };
       if (f.partial) {
-        // First chunk after sending: drop a leading newline so the
-        // streamed reply doesn't start on the same line as `you > foo`.
         if (!waitingForReply && !lineDirty) process.stdout.write('\n');
+        answerBuffer += f.text;
         process.stdout.write(f.text);
         lineDirty = !f.text.endsWith('\n');
       } else {
@@ -590,7 +655,17 @@ export async function runRepl(): Promise<number> {
           process.stdout.write('\n');
           lineDirty = false;
         }
-        process.stdout.write(f.text + '\n');
+        const finalText = f.text;
+        if (process.stdout.isTTY && hasBlockMarkdown(finalText)) {
+          try {
+            process.stdout.write(renderMarkdown(finalText));
+          } catch {
+            process.stdout.write(finalText + '\n');
+          }
+        } else {
+          process.stdout.write(finalText + '\n');
+        }
+        answerBuffer = '';
       }
     }
 
