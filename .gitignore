@@ -6,6 +6,10 @@ node_modules/
 # Build output
 dist/
 
+# Build-only sync of sibling agentmesh/platform-mcp/ — created by build-and-deploy.sh
+# so the Docker context can COPY it. Never commit.
+.platform-mcp-build/
+
 # Local data & auth
 store/
 data/
