@@ -181,6 +181,7 @@ async function spawnContainer(session: Session): Promise<void> {
     provider,
     contribution,
     agentIdentifier,
+    session,
   );
 
   log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -499,13 +500,21 @@ async function buildContainerArgs(
   containerConfig: import('./container-config.js').ContainerConfig,
   provider: string,
   providerContribution: ProviderContainerContribution,
-  agentIdentifier?: string,
+  agentIdentifier: string | undefined,
+  session: Session,
 ): Promise<string[]> {
   const args: string[] = ['run', '--rm', '--name', containerName, '--label', CONTAINER_INSTALL_LABEL];
 
   // Environment — only vars read by code we don't own.
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Session identity + privacy — read by the agent-runner's snapshot writer
+  // (skips when SESSION_PRIVACY=incognito) and any future per-session
+  // gating. Universal across providers, so injected here rather than in
+  // each provider's env contribution.
+  args.push('-e', `SESSION_ID=${session.id}`);
+  args.push('-e', `SESSION_PRIVACY=${session.privacy}`);
 
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {

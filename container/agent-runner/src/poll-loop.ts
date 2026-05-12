@@ -8,6 +8,7 @@ import {
   setContinuation,
 } from './db/session-state.js';
 import { formatMessages, extractRouting, categorizeMessage, isClearCommand, isRunnerCommand, stripInternalTags, type RoutingContext } from './formatter.js';
+import { writeSnapshot } from './snapshot.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -366,6 +367,11 @@ async function processQuery(
         if (event.text) {
           dispatchResultText(event.text, routing);
         }
+        // End-of-turn checkpoint. Fire-and-forget — uploads the
+        // session-dir tar to Warp so a future pod incarnation can resume
+        // by downloading it. Self-coalescing under burst; skips when
+        // SESSION_PRIVACY=incognito or WARP_URL is unset.
+        void writeSnapshot();
       }
     }
   } finally {
