@@ -14,6 +14,7 @@ import { runMigrations } from './db/migrations/index.js';
 import { ensureContainerRuntimeRunning, cleanupOrphans } from './container-runtime.js';
 import { startActiveDeliveryPoll, startSweepDeliveryPoll, setDeliveryAdapter, stopDeliveryPolls } from './delivery.js';
 import { startHostSweep, stopHostSweep } from './host-sweep.js';
+import { startMgmtServer, stopMgmtServer } from './mgmt-server.js';
 import { routeInbound } from './router.js';
 import { log } from './log.js';
 
@@ -163,6 +164,11 @@ async function main(): Promise<void> {
   startHostSweep();
   log.info('Host sweep started');
 
+  // 7. Start management HTTP server — dashboard / CLI parity surface
+  // (`/api/v1/a8/claw[/...]` mirroring a8-code). Bound to 127.0.0.1 by
+  // default; override MGMT_HOST=0.0.0.0 for LAN access.
+  startMgmtServer();
+
   log.info('NanoClaw running');
 }
 
@@ -178,6 +184,7 @@ async function shutdown(signal: string): Promise<void> {
   }
   stopDeliveryPolls();
   stopHostSweep();
+  await stopMgmtServer();
   try {
     await teardownChannelAdapters();
   } finally {
