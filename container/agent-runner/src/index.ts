@@ -100,8 +100,16 @@ async function main(): Promise<void> {
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'mcp-tools', 'index.ts');
 
-  // Build MCP servers config: nanoclaw built-in (always stdio) + any from
-  // container.json (stdio | http | sse, see providers/types.ts).
+  // Build MCP servers config: nanoclaw built-in (always stdio) +
+  // articul8 platform MCP (always stdio, when present) + any extras
+  // from container.json (stdio | http | sse).
+  //
+  // articul8 is the Platform MCP federation library — bundles 25 ops
+  // across warp, intelligence, agentmesh, prompt_hub, model_manager,
+  // tool_manager (catalog v0.2). Bundled into the image at
+  // /app/platform-mcp/ by build-and-deploy.sh; we conditionally enable
+  // it when the entrypoint file is present, so local-mode setups
+  // that don't sync the sibling dir still boot.
   const mcpServers: Record<string, McpServerConfig> = {
     nanoclaw: {
       type: 'stdio',
@@ -110,6 +118,42 @@ async function main(): Promise<void> {
       env: {},
     },
   };
+
+  const platformMcpEntry = '/app/platform-mcp/src/stdio-entrypoint.ts';
+  if (fs.existsSync(platformMcpEntry)) {
+    // Forward only the env the platform MCP library needs — explicit
+    // allowlist so the catalog can audit what's exposed. Empty values
+    // are dropped to keep the child process env tidy.
+    const forward: Record<string, string> = {};
+    for (const k of [
+      'TENANT_ID',
+      'USER_ID',
+      'WARP_URL',
+      'MODEL_MANAGER_URL',
+      'TOOL_MANAGER_URL',
+      'PROMPT_HUB_URL',
+      'METERING_USAGE_URL',
+      'MISSION_TOKEN',
+      'MISSION_ID',
+      'TASK_ID',
+      'AGENT_ID',
+      'AGENT_TYPE',
+      'SESSION_ID',
+      'SESSION_PRIVACY',
+    ]) {
+      const v = process.env[k];
+      if (v) forward[k] = v;
+    }
+    mcpServers.articul8 = {
+      type: 'stdio',
+      command: 'bun',
+      args: ['run', platformMcpEntry],
+      env: forward,
+    };
+    log(`Platform MCP (articul8) enabled: ${platformMcpEntry}`);
+  } else {
+    log(`Platform MCP not present at ${platformMcpEntry} — skipping (local-mode setup likely)`);
+  }
 
   for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
     mcpServers[name] = serverConfig;
