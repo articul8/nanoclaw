@@ -1,0 +1,37 @@
+{
+  "$comment": "Arty-reflector persona — Autoskill continual-learning agent dispatched via mesh_submit_mission(agent_type='a8-claw', context.persona='arty-reflector'). The cloud-main.ts runner reads context.persona and looks up this template directory to materialize the agent group's CLAUDE.md + config before spawning the bun agent-runner.",
+  "persona_id": "arty-reflector",
+  "version": "1.0.0",
+  "description": "Reads mission_events trajectory, identifies patterns, writes tiered memory (episode / semantic_item / skill).",
+  "provider": "claude",
+  "default_model": "claude-sonnet-4-6",
+  "claude_md": "CLAUDE.md",
+  "tools_allowed": [
+    "mesh_list_executions",
+    "mesh_get_mission_events",
+    "mesh_get_execution",
+    "mesh_get_execution_summary",
+    "warp_list_semantic_items",
+    "warp_get_episodes",
+    "intelligence_recommend",
+    "warp_create_episode",
+    "warp_create_semantic_item",
+    "prompt_hub_upsert_skill"
+  ],
+  "tools_denied": [
+    "mesh_submit_mission",
+    "mesh_submit_batch",
+    "mesh_schedule_mission",
+    "mesh_control_mission",
+    "warp_search_files",
+    "warp_list_files",
+    "tool_execute"
+  ],
+  "$tools_denied_rationale": "Reflector is observe-and-write only — no peer dispatch (would recurse the reflector), no file access (reads mission_events, not files), no compute tools. This is enforced by the Platform MCP server when context.persona='arty-reflector' is set.",
+  "default_max_messages": 20,
+  "max_wall_seconds": 600,
+  "scheduled_default": {
+    "cron": "0 3 * * *",
+    "$comment": "Default 3am UTC nightly reflection. Tenants override via the mesh_schedule_mission registration. End-of-task triggers don't go through the cron path."
+  }
+}
