@@ -33,6 +33,7 @@ import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
+import { fetchSessionRecall, withRecall } from './recall.js';
 import { restoreSnapshot } from './restore.js';
 
 function log(msg: string): void {
@@ -66,7 +67,19 @@ async function main(): Promise<void> {
   // /workspace/agent/CLAUDE.md — the composed entry imports the shared
   // base (/app/CLAUDE.md) and each enabled module's fragment. Per-group
   // memory lives in /workspace/agent/CLAUDE.local.md (auto-loaded).
-  const instructions = buildSystemPromptAddendum(config.assistantName || undefined);
+  let instructions = buildSystemPromptAddendum(config.assistantName || undefined);
+
+  // Session-boot recall — Autoskill recall tier. Calls IntelligenceService
+  // once at boot and appends pre-ranked context to the system prompt so
+  // the agent doesn't burn context-window tokens on search round-trips.
+  // No-op for incognito sessions, standalone mode, or HTTP failures.
+  const recall = await fetchSessionRecall();
+  if (recall.prompt_snippet) {
+    instructions = withRecall(instructions, recall.prompt_snippet);
+    log(`Recall: injected ${recall.items.length} item(s) into system prompt`);
+  } else if (recall.skipped_reason && recall.skipped_reason !== 'no-warp') {
+    log(`Recall skipped: ${recall.skipped_reason}${recall.detail ? ' — ' + recall.detail : ''}`);
+  }
 
   // Discover additional directories mounted at /workspace/extra/*
   const additionalDirectories: string[] = [];
