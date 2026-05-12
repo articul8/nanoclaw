@@ -33,6 +33,7 @@ import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
 import type { McpServerConfig } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
+import { restoreSnapshot } from './restore.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
@@ -41,6 +42,19 @@ function log(msg: string): void {
 const CWD = '/workspace/agent';
 
 async function main(): Promise<void> {
+  // Pod-boot session restore — pairs with end-of-turn snapshot.ts. When
+  // RESUME_SESSION_ID is set (set by the orchestrator on a re-spawn
+  // resume), download the latest snapshot from Warp and extract into
+  // /workspace/ BEFORE loadConfig() / poll-loop touch any session files.
+  // No-op when not resuming, when SESSION_PRIVACY=incognito, or in
+  // local mode (workspace already on disk).
+  const restoreResult = await restoreSnapshot();
+  if (restoreResult.restored) {
+    log(`Restored session snapshot ${restoreResult.file_id} (${restoreResult.size_bytes} bytes)`);
+  } else if (restoreResult.reason && restoreResult.reason !== 'no-resume') {
+    log(`Restore skipped: ${restoreResult.reason}${restoreResult.detail ? ' — ' + restoreResult.detail : ''}`);
+  }
+
   const config = loadConfig();
   const providerName = config.provider.toLowerCase() as ProviderName;
 
