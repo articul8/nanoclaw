@@ -30,6 +30,7 @@ import {
   type CompletionStatus,
   type MissionCompletion,
 } from './envelope.js';
+import { maybeTriggerReflector } from './reflector-trigger.js';
 import type { WarpQueueClient } from './warp-queue-client.js';
 
 const COMPLETIONS_QUEUE = 'mission_completions';
@@ -126,6 +127,19 @@ export class MissionConsumer {
       );
 
       const completion = await this.runOne(envelope);
+      // Autoskill end-of-task hook — fire-and-forget a reflector mission
+      // for non-incognito, non-reflector successes. Doesn't block the
+      // completion publish; the reflector picks up later from its own
+      // queue entry. Failures are logged, never thrown.
+      const triggered = await maybeTriggerReflector(
+        this.opts.queue,
+        envelope,
+        completion,
+        this.opts.agentId,
+      );
+      if (triggered.triggered) {
+        log(`reflector queued: ${triggered.reflector_mission_id}`);
+      }
       await this.publishCompletion(completion);
       this.currentMissionId = null;
       this.running = false;

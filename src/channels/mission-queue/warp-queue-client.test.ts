@@ -28,7 +28,7 @@ describe('WarpQueueClient construction', () => {
   });
 
   it('strips trailing slashes from baseUrl', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse([])));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(jsonResponse([])));
     const c = new WarpQueueClient({ baseUrl: 'http://warp.example.com///', fetchImpl: fetchImpl as unknown as typeof fetch });
     await c.pollMessages('q');
     const url = fetchImpl.mock.calls[0][0] as string;
@@ -36,7 +36,7 @@ describe('WarpQueueClient construction', () => {
   });
 
   it('defaults system tenant/user to "system"', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse([])));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(jsonResponse([])));
     const c = new WarpQueueClient({ baseUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     await c.pollMessages('q');
     const init = fetchImpl.mock.calls[0][1] as RequestInit;
@@ -66,21 +66,21 @@ describe('pollMessages', () => {
   });
 
   it('returns bare array as-is', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse([{ a: 1 }])));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(jsonResponse([{ a: 1 }])));
     const c = new WarpQueueClient({ baseUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     const out = await c.pollMessages('q');
     expect(out).toEqual([{ a: 1 }]);
   });
 
   it('treats 204 No Content as empty', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(new Response(null, { status: 204 })));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(new Response(null, { status: 204 })));
     const c = new WarpQueueClient({ baseUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     const out = await c.pollMessages('q');
     expect(out).toEqual([]);
   });
 
   it('returns empty array on 5xx (never throws — pollers must stay alive)', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(new Response('boom', { status: 500 })));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(new Response('boom', { status: 500 })));
     const c = new WarpQueueClient({ baseUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     const out = await c.pollMessages('q');
     expect(out).toEqual([]);
@@ -94,7 +94,7 @@ describe('pollMessages', () => {
   });
 
   it('encodes queue name for URL safety', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse([])));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(jsonResponse([])));
     const c = new WarpQueueClient({ baseUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     await c.pollMessages('queue/with slash');
     const url = fetchImpl.mock.calls[0][0] as string;
@@ -102,7 +102,7 @@ describe('pollMessages', () => {
   });
 
   it('passes maxMessages and timeoutSeconds to URL', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(jsonResponse([])));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(jsonResponse([])));
     const c = new WarpQueueClient({ baseUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     await c.pollMessages('q', { maxMessages: 5, timeoutSeconds: 10 });
     const url = fetchImpl.mock.calls[0][0] as string;
@@ -113,7 +113,7 @@ describe('pollMessages', () => {
 
 describe('publish', () => {
   it('POSTs body + priority and returns true on 2xx', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(new Response('', { status: 202 })));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(new Response('', { status: 202 })));
     const c = new WarpQueueClient({ baseUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     const ok = await c.publish('q', { run_id: 'r1' });
     expect(ok).toBe(true);
@@ -124,7 +124,7 @@ describe('publish', () => {
   });
 
   it('respects priority override', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(new Response('', { status: 202 })));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(new Response('', { status: 202 })));
     const c = new WarpQueueClient({ baseUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     await c.publish('q', { x: 1 }, { priority: 9 });
     const init = fetchImpl.mock.calls[0][1] as RequestInit;
@@ -132,7 +132,7 @@ describe('publish', () => {
   });
 
   it('returns false on HTTP error (never throws)', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(new Response('nope', { status: 500 })));
+    const fetchImpl = vi.fn((_url: string | URL, _init?: RequestInit) => Promise.resolve(new Response('nope', { status: 500 })));
     const c = new WarpQueueClient({ baseUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     const ok = await c.publish('q', {});
     expect(ok).toBe(false);

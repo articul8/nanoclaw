@@ -106,7 +106,7 @@ describe('buildEnv', () => {
 describe('createSubprocessRunner', () => {
   it('prepares workspace + writes container.json before spawning', async () => {
     const fakeProc = new FakeProc();
-    const spawnImpl = vi.fn(() => fakeProc as unknown as ReturnType<typeof import('child_process').spawn>);
+    const spawnImpl = vi.fn(() => fakeProc as unknown as ReturnType<typeof import('child_process').spawn>) as unknown as typeof import('child_process').spawn;
     const runner = createSubprocessRunner({
       agentId: 'pod-1',
       workspaceDir: tmpWorkspace,
@@ -141,7 +141,7 @@ describe('createSubprocessRunner', () => {
 
   it('returns status=partial when subprocess exits 0 but no result file', async () => {
     const fakeProc = new FakeProc();
-    const spawnImpl = vi.fn(() => fakeProc as unknown as ReturnType<typeof import('child_process').spawn>);
+    const spawnImpl = vi.fn(() => fakeProc as unknown as ReturnType<typeof import('child_process').spawn>) as unknown as typeof import('child_process').spawn;
     const runner = createSubprocessRunner({
       agentId: 'pod-1',
       workspaceDir: tmpWorkspace,
@@ -155,7 +155,7 @@ describe('createSubprocessRunner', () => {
 
   it('returns status=failed on non-zero exit code', async () => {
     const fakeProc = new FakeProc();
-    const spawnImpl = vi.fn(() => fakeProc as unknown as ReturnType<typeof import('child_process').spawn>);
+    const spawnImpl = vi.fn(() => fakeProc as unknown as ReturnType<typeof import('child_process').spawn>) as unknown as typeof import('child_process').spawn;
     const runner = createSubprocessRunner({
       agentId: 'pod-1',
       workspaceDir: tmpWorkspace,
@@ -174,7 +174,7 @@ describe('createSubprocessRunner', () => {
     await fsp.writeFile(path.join(tmpWorkspace, 'mission-result.json'), '{"status":"success"}');
 
     const fakeProc = new FakeProc();
-    const spawnImpl = vi.fn(() => fakeProc as unknown as ReturnType<typeof import('child_process').spawn>);
+    const spawnImpl = vi.fn(() => fakeProc as unknown as ReturnType<typeof import('child_process').spawn>) as unknown as typeof import('child_process').spawn;
     const runner = createSubprocessRunner({
       agentId: 'pod-1',
       workspaceDir: tmpWorkspace,

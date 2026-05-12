@@ -12,7 +12,7 @@ import { WarpQueueClient } from './warp-queue-client.js';
 
 function makeQueue() {
   const calls: Array<{ url: string; body: unknown }> = [];
-  const fetchImpl = vi.fn((url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const fetchImpl = vi.fn((url: string | URL, init?: RequestInit): Promise<Response> => {
     const u = String(url);
     if (init?.method === 'POST') {
       const sent = JSON.parse(init.body as string);

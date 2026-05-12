@@ -42,7 +42,7 @@ function fakeQueue(pollSequence: Array<Record<string, unknown>[]>) {
   const published: Array<{ queue: string; body: unknown }> = [];
   let publishOk = true;
 
-  const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+  const fetchImpl = vi.fn(async (input: string | URL, init?: RequestInit): Promise<Response> => {
     const url = String(input);
     if (init?.method === 'POST') {
       const sent = init.body ? JSON.parse(init.body as string) : null;
@@ -77,12 +77,14 @@ function fakeQueue(pollSequence: Array<Record<string, unknown>[]>) {
 describe('MissionConsumer.consumeOneAndExit', () => {
   it('polls until a message arrives, runs it, publishes a completion, exits', async () => {
     const { queue, published } = fakeQueue([[], [], [validEnvelope()]]);
-    const runner: MissionRunner = vi.fn(async (env) => ({
-      status: 'success',
-      result: { summary: `analyzed ${env.role}` },
-      usage: { tokens_in: 10, tokens_out: 5, model_calls: 1, tool_calls: 0 },
-      audit_event_count: 3,
-    }));
+    const runner: MissionRunner = vi.fn(
+      async (env): Promise<RunnerResult> => ({
+        status: 'success',
+        result: { summary: `analyzed ${env.role}` },
+        usage: { tokens_in: 10, tokens_out: 5, model_calls: 1, tool_calls: 0 },
+        audit_event_count: 3,
+      }),
+    );
 
     const consumer = new MissionConsumer({
       queue,
@@ -97,9 +99,15 @@ describe('MissionConsumer.consumeOneAndExit', () => {
     expect(completion?.agent_id).toBe('pod-test-1');
     expect(completion?.audit_event_count).toBe(3);
     expect(runner).toHaveBeenCalledTimes(1);
-    expect(published).toEqual([
+    // Two publishes per successful non-incognito mission: an
+    // agent_execute_a8_claw for the autoskill reflector trigger (fire-
+    // and-forget; runs in a parallel session), plus the mission_completions
+    // entry the coordinator consumes. Assert the completion specifically;
+    // the reflector dispatch shape is covered in reflector-trigger.test.ts.
+    expect(published.filter((p) => p.queue === 'mission_completions')).toEqual([
       { queue: 'mission_completions', body: completion },
     ]);
+    expect(published.some((p) => p.queue === 'agent_execute_a8_claw')).toBe(true);
   });
 
   it('skips foreign agent_type without invoking the runner', async () => {
@@ -108,7 +116,7 @@ describe('MissionConsumer.consumeOneAndExit', () => {
       [],
       [validEnvelope()],
     ]);
-    const runner: MissionRunner = vi.fn(async () => ({
+    const runner: MissionRunner = vi.fn(async (): Promise<RunnerResult> => ({
       status: 'success',
       result: { summary: 'ok' },
     }));
@@ -121,7 +129,8 @@ describe('MissionConsumer.consumeOneAndExit', () => {
     const completion = await consumer.consumeOneAndExit();
     expect(runner).toHaveBeenCalledTimes(1);
     expect(completion?.mission_id).toBe('mis-1');
-    expect(published.length).toBe(1);
+    // 1 completion + 1 reflector dispatch = 2 publishes total on a successful run.
+    expect(published.filter((p) => p.queue === 'mission_completions').length).toBe(1);
   });
 
   it('drops a malformed envelope (no runner invocation, no completion published for that message)', async () => {
@@ -130,7 +139,7 @@ describe('MissionConsumer.consumeOneAndExit', () => {
       [],
       [validEnvelope()],
     ]);
-    const runner: MissionRunner = vi.fn(async () => ({
+    const runner: MissionRunner = vi.fn(async (): Promise<RunnerResult> => ({
       status: 'success',
       result: { summary: 'ok' },
     }));
@@ -144,8 +153,10 @@ describe('MissionConsumer.consumeOneAndExit', () => {
     expect(runner).toHaveBeenCalledTimes(1);
     expect(completion?.mission_id).toBe('mis-1');
     // Exactly one completion published (for the valid message). The dropped
-    // malformed envelope produced no completion at all.
-    expect(published.length).toBe(1);
+    // malformed envelope produced no completion at all. The reflector
+    // trigger for the successful run adds an agent_execute_a8_claw publish;
+    // assert on completions specifically.
+    expect(published.filter((p) => p.queue === 'mission_completions').length).toBe(1);
   });
 
   it('converts runner exceptions to status=failed without crashing the pod', async () => {
@@ -168,7 +179,7 @@ describe('MissionConsumer.consumeOneAndExit', () => {
   it('logs but does not throw when completion publish fails (operational warning)', async () => {
     const fake = fakeQueue([[validEnvelope()]]);
     fake.setPublishOk(false);
-    const runner: MissionRunner = vi.fn(async () => ({
+    const runner: MissionRunner = vi.fn(async (): Promise<RunnerResult> => ({
       status: 'success',
       result: { summary: 'ok' },
     }));
