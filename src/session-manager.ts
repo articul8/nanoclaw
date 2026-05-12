@@ -144,6 +144,82 @@ export function resolveSession(
   return { session, created: true };
 }
 
+export interface ResumeResult {
+  ok: boolean;
+  /** Reason for failure; absent on success. */
+  reason?: 'not-found' | 'wake-failed';
+  /** The (possibly-updated) session row. */
+  session?: Session;
+  /** Whether the call had to flip status='closed'->'active'. False if it was already active. */
+  reactivated: boolean;
+  /** Whether wakeContainer triggered a spawn (true) or no-op'd because the container was already running. */
+  spawned: boolean;
+}
+
+/**
+ * Local-mode resume — re-activate a session and ensure its container is
+ * running. Mirrors a8-code's two-path resume (in-place vs re-spawn) but
+ * trivially in local mode: the per-session SQLite files are already on
+ * disk (no Warp snapshot roundtrip needed), so re-spawn is just calling
+ * wakeContainer() — the existing idempotent path the router uses for
+ * fresh messages on a sleeping session.
+ *
+ * Path mapping vs a8-code:
+ *   - in-place (a8-code paused/pending) → arty container_status='running'
+ *     means already alive; resume is a no-op.
+ *   - re-spawn (a8-code stopped/failed/completed) → arty either status=
+ *     'closed' (user-closed) or container_status='stopped' (idle). Flip
+ *     status back to 'active' if needed, then wakeContainer.
+ *
+ * Session_id is preserved across resumes — durable workstream identity
+ * per feedback_session_id_is_durable. The function never mints a new id.
+ *
+ * Caller (dashboard HTTP surface / future /resume CLI) interprets the
+ * result. Never throws — failure surfaces via `ok=false` + `reason`.
+ */
+export async function resumeSession(sessionId: string): Promise<ResumeResult> {
+  // Imported lazily to avoid a circular dep — container-runner imports
+  // session-manager for sessionDir/inboundDbPath via the same module
+  // graph, and a top-level import here would form a cycle on host boot.
+  const { wakeContainer } = await import('./container-runner.js');
+
+  const existing = getSession(sessionId);
+  if (!existing) {
+    return { ok: false, reason: 'not-found', reactivated: false, spawned: false };
+  }
+
+  // Flip status back to 'active' if the user previously closed it. The
+  // privacy flag, agent_group_id, and all message history stay intact —
+  // we're resuming THE SAME workstream.
+  let reactivated = false;
+  if (existing.status === 'closed') {
+    updateSession(sessionId, { status: 'active' });
+    reactivated = true;
+    log.info('Session reactivated', { sessionId });
+  }
+
+  // Re-read the row so the caller sees the post-update state (status
+  // now 'active'). updateSession returns void — explicit re-fetch is the
+  // cleanest way to surface fresh values.
+  const session = getSession(sessionId);
+  if (!session) {
+    // Shouldn't happen — we just read it. Treat as transient.
+    return { ok: false, reason: 'not-found', reactivated, spawned: false };
+  }
+
+  // wakeContainer is idempotent: returns immediately if already running,
+  // joins an in-flight spawn promise if one's in progress, else spawns
+  // fresh. Returns boolean — we propagate the failure reason but don't
+  // throw.
+  const wasAlreadyRunning = session.container_status === 'running';
+  const woken = await wakeContainer(session);
+  if (!woken) {
+    return { ok: false, reason: 'wake-failed', reactivated, spawned: false, session };
+  }
+
+  return { ok: true, reactivated, spawned: !wasAlreadyRunning, session };
+}
+
 /** Create the session folder and initialize both DBs. */
 export function initSessionFolder(agentGroupId: string, sessionId: string): void {
   const dir = sessionDir(agentGroupId, sessionId);
