@@ -113,6 +113,10 @@ export function resolveSession(
 
   const id = generateId();
   const lookupThreadId = sessionMode === 'per-thread' ? threadId : null;
+  // Privacy defaults to 'normal'. `./a8-claw --incognito` sets
+  // DEFAULT_SESSION_PRIVACY='incognito' so new sessions in that run start
+  // private. Immutable after creation — the row never gets UPDATEd.
+  const defaultPrivacy = process.env.DEFAULT_SESSION_PRIVACY === 'incognito' ? 'incognito' : 'normal';
   const session: Session = {
     id,
     agent_group_id: agentGroupId,
@@ -123,11 +127,19 @@ export function resolveSession(
     container_status: 'stopped',
     last_active: null,
     created_at: new Date().toISOString(),
+    privacy: defaultPrivacy,
   };
 
   createSession(session);
   initSessionFolder(agentGroupId, id);
-  log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
+  log.info('Session created', {
+    id,
+    agentGroupId,
+    messagingGroupId,
+    threadId: lookupThreadId,
+    sessionMode,
+    privacy: defaultPrivacy,
+  });
 
   return { session, created: true };
 }

@@ -12,7 +12,7 @@
  * break user conversations.
  */
 
-import { isIncognito, platformPostJson } from '../auth/tenant-context.js';
+import { isIncognitoSession, platformPostJson } from '../auth/tenant-context.js';
 
 import type { CredentialSource } from './main-model-credentials.js';
 
@@ -72,8 +72,8 @@ export function buildMeteringRecord(usage: MainModelUsage, now: Date = new Date(
  * have it set). Errors during the POST are caught and logged.
  */
 export function reportMainModelUsage(usage: MainModelUsage): void {
-  if (isIncognito()) {
-    // Incognito mode: silently skip metering. No platform telemetry.
+  if (isIncognitoSession(usage.sessionId)) {
+    // Incognito session: silently skip metering. No platform telemetry.
     return;
   }
   const url = process.env.METERING_USAGE_URL;

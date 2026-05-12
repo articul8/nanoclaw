@@ -208,6 +208,7 @@ function fakeSession(): Session {
     container_status: 'stopped',
     last_active: null,
     created_at: new Date().toISOString(),
+    privacy: 'normal',
   };
 }
 

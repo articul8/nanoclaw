@@ -13,13 +13,27 @@
  *
  * Channel-adapter calls (Slack, Telegram, Discord, etc.) do NOT go
  * through this wrapper — those use per-channel auth (OAuth tokens etc).
+ *
+ * Incognito is PER-SESSION (migration 014, `sessions.privacy`). A
+ * session-scoped call passes `sessionId` and platformFetch refuses if
+ * that session has `privacy='incognito'`. Runtime-infra calls (heartbeat,
+ * mission_events audit, completion publish) omit sessionId — they're the
+ * runtime's own platform work, not the session's, and never gated.
  */
 
+import { getSessionPrivacy } from '../db/sessions.js';
 import { assertAllowed } from './egress-allowlist.js';
 
 export interface PlatformFetchOptions extends RequestInit {
   /** Per-call override for X-Mission-Token. Falls back to MISSION_TOKEN env. */
   missionToken?: string;
+  /**
+   * Session this call is scoped to. When provided, the session's privacy
+   * is checked; an incognito session refuses outbound. Omit for
+   * runtime-infra calls (heartbeat, audit, completion publish) — those
+   * are never session-scoped.
+   */
+  sessionId?: string;
 }
 
 export interface TenantContext {
@@ -29,13 +43,21 @@ export interface TenantContext {
 }
 
 /**
- * True when the runtime is in incognito mode (CONNECTION_STATE=incognito).
- * In incognito mode, platform calls are NOT made at all — callers should
- * check this and skip the call rather than relying on platformFetch to
- * throw. The throw is defense-in-depth.
+ * True when the given session is incognito and platform calls scoped to
+ * it must not leave the runtime. Returns false for non-existent sessions
+ * — callers without a session id are doing runtime-infra work, which is
+ * never incognito by definition.
  */
-export function isIncognito(): boolean {
-  return process.env.CONNECTION_STATE === 'incognito';
+export function isIncognitoSession(sessionId: string): boolean {
+  if (!sessionId) return false;
+  try {
+    return getSessionPrivacy(sessionId) === 'incognito';
+  } catch {
+    // DB not initialized (e.g. very early boot, or container-side where the
+    // host DB isn't reachable). Default to NOT incognito — the runtime
+    // proceeds, and the agent-runner enforces privacy on its own side.
+    return false;
+  }
 }
 
 /**
@@ -69,15 +91,16 @@ export function readTenantContext(): TenantContext {
  * `fetch` for those endpoints. Channel adapters use their own auth.
  */
 export async function platformFetch(url: string, options: PlatformFetchOptions = {}): Promise<Response> {
-  if (isIncognito()) {
+  if (options.sessionId && isIncognitoSession(options.sessionId)) {
     throw new Error(
-      `[tenant-context] platformFetch refused: runtime is in INCOGNITO mode (CONNECTION_STATE=incognito). ` +
-        `No platform calls allowed. Callers should check isIncognito() and skip the call. URL: ${url}`,
+      `[tenant-context] platformFetch refused: session ${options.sessionId} is INCOGNITO. ` +
+        `Session-scoped calls in an incognito session must not leave the runtime. ` +
+        `Callers should check isIncognitoSession(sessionId) and skip the call. URL: ${url}`,
     );
   }
   assertAllowed(url);
   const { tenantId, userId, missionToken: envToken } = readTenantContext();
-  const { missionToken: callToken, headers: callerHeaders, ...rest } = options;
+  const { missionToken: callToken, headers: callerHeaders, sessionId: _sessionId, ...rest } = options;
 
   const headers: Record<string, string> = {
     'X-Tenant-ID': tenantId,

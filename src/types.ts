@@ -99,6 +99,8 @@ export interface MessagingGroupAgent {
   created_at: string;
 }
 
+export type SessionPrivacy = 'normal' | 'incognito';
+
 export interface Session {
   id: string;
   agent_group_id: string;
@@ -109,6 +111,15 @@ export interface Session {
   container_status: 'running' | 'idle' | 'stopped';
   last_active: string | null;
   created_at: string;
+  /**
+   * Set at session creation, immutable thereafter. `'incognito'` means
+   * NO platform calls scoped to this session leave the runtime — no
+   * snapshot to Warp, no episode writes, no semantic-memory writes.
+   * Runtime-infra calls (mission_events audit, heartbeat, completion
+   * publish) are NOT gated by this. Migration 014 adds the column and
+   * defaults existing rows to `'normal'`.
+   */
+  privacy: SessionPrivacy;
 }
 
 // ── Session DB entities ──

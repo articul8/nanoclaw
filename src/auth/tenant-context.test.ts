@@ -142,18 +142,47 @@ describe('platformFetch', () => {
     expect(mock).not.toHaveBeenCalled();
   });
 
-  it('refuses ALL platform calls when CONNECTION_STATE=incognito', async () => {
-    process.env.CONNECTION_STATE = 'incognito';
+  it('refuses session-scoped calls when sessionId belongs to an incognito session', async () => {
+    // Stub the DB lookup so we don't need a real SQLite for this unit test.
+    // The privacy resolution path goes via db/sessions.getSessionPrivacy.
+    const mod = await import('../db/sessions.js');
+    const spy = vi.spyOn(mod, 'getSessionPrivacy').mockReturnValue('incognito');
     try {
       const mock = vi.fn().mockResolvedValue(new Response('ok'));
       vi.stubGlobal('fetch', mock);
       await expect(
-        platformFetch('http://aks-warp-service.aks-warp-apps.svc.cluster.local:8085/foo'),
-      ).rejects.toThrow(/INCOGNITO mode/);
+        platformFetch('http://aks-warp-service.aks-warp-apps.svc.cluster.local:8085/foo', {
+          sessionId: 'sess-private-1',
+        }),
+      ).rejects.toThrow(/INCOGNITO/);
       expect(mock).not.toHaveBeenCalled();
     } finally {
-      delete process.env.CONNECTION_STATE;
+      spy.mockRestore();
     }
+  });
+
+  it('allows session-scoped calls when sessionId is normal', async () => {
+    const mod = await import('../db/sessions.js');
+    const spy = vi.spyOn(mod, 'getSessionPrivacy').mockReturnValue('normal');
+    try {
+      const mock = vi.fn().mockResolvedValue(new Response('ok'));
+      vi.stubGlobal('fetch', mock);
+      await platformFetch('http://aks-warp-service.aks-warp-apps.svc.cluster.local:8085/foo', {
+        sessionId: 'sess-public-1',
+      });
+      expect(mock).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('allows runtime-infra calls without a sessionId regardless of any incognito session in the DB', async () => {
+    // No sessionId in options → not session-scoped → never gated. This is the
+    // path heartbeat / mission_events / completion publish take.
+    const mock = vi.fn().mockResolvedValue(new Response('ok'));
+    vi.stubGlobal('fetch', mock);
+    await platformFetch('http://aks-warp-service.aks-warp-apps.svc.cluster.local:8085/foo');
+    expect(mock).toHaveBeenCalledTimes(1);
   });
 });
 

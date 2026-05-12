@@ -50,14 +50,17 @@ type EnvDict = Record<string, string>;
 const LOCAL_TENANT_PREFIX = 'local-dev-tenant';
 
 /**
- * Connection / privacy state recorded in .env and shown via status.
- *   offline    — target connected, but auth pending (first-run default; can graduate via `connect`)
+ * Connection state recorded in .env and shown via status.
+ *   offline    — target connected, but auth pending (first-run default; graduates via `connect`)
  *   connected  — auth resolved; platform features enabled
- *   incognito  — explicitly opted out of platform; runtime never calls Warp / MM /
- *                metering. Inference still works via the direct provider, but no
- *                episodes, audit, graph entities, or usage metering are written.
+ *
+ * Incognito was previously an install-wide third value here; it has moved
+ * to `sessions.privacy` (migration 014) — set per-session, not per-install.
+ * The `--incognito` CLI flag is preserved as a "default new sessions to
+ * incognito for this run" hint (DEFAULT_SESSION_PRIVACY env), not as a
+ * connection-state override.
  */
-type ConnectionState = 'offline' | 'connected' | 'incognito';
+type ConnectionState = 'offline' | 'connected';
 
 /** Derive a deterministic local user id from the OS user when offline. */
 function localUserId(): string {
@@ -165,40 +168,11 @@ async function configure(): Promise<void> {
   const userId = existing.USER_ID || localUserId();
   const priorState: ConnectionState = (existing.CONNECTION_STATE as ConnectionState) || 'offline';
 
-  // Privacy mode — user-facing decision, two long-term values:
-  //   connected  — wants platform features (memory, audit, metering, dashboard)
-  //   incognito  — opts out; runtime never calls platform endpoints
-  // The intermediate "offline" state is the implicit pending-state when
-  // target=connected but auth hasn't completed yet; that's surfaced by the
-  // `connect` flow rather than as a user-facing prompt option.
-  const targetMode = await select({
-    message: 'Privacy mode',
-    options: [
-      {
-        value: 'connected',
-        label:
-          'connected  (memory, audit, metering, dashboard — runs in OFFLINE pending until you `./a8-claw connect`)',
-        hint: 'recommended',
-      },
-      {
-        value: 'incognito',
-        label: 'incognito  (no platform calls ever — chat-only, no persistence, no telemetry)',
-      },
-    ],
-    initialValue: priorState === 'incognito' ? 'incognito' : 'connected',
-  });
-  if (isCancel(targetMode)) {
-    cancel('configuration cancelled');
-    process.exit(0);
-  }
-  // Map target → persisted state. If user picked connected, preserve a prior
-  // 'connected' (already auth'd); otherwise enter offline pending.
-  let connectionState: ConnectionState;
-  if (targetMode === 'incognito') {
-    connectionState = 'incognito';
-  } else {
-    connectionState = priorState === 'connected' ? 'connected' : 'offline';
-  }
+  // Install-wide privacy mode is gone — incognito is per-session now
+  // (sessions.privacy column). Connection state is only "offline pending
+  // auth" vs "connected after `./a8-claw connect`". A previously-connected
+  // install stays connected; otherwise we enter offline pending.
+  const connectionState: ConnectionState = priorState === 'connected' ? 'connected' : 'offline';
 
   const route = await select({
     message: 'Main-model routing',
@@ -330,19 +304,8 @@ async function configure(): Promise<void> {
         `audit, cross-session graph) are pending.`,
         '',
         `When you have AgentMesh credentials, run:  ${kleur.cyan('./a8-claw connect')}`,
-      ].join('\n'),
-      'configured',
-    );
-  } else if (connectionState === 'incognito') {
-    note(
-      [
-        `Running in ${kleur.magenta('INCOGNITO')} mode — chat is local-only.`,
         '',
-        'No platform calls (Warp, Tool Manager, Model Manager metering) will be',
-        'made. No episodes, audit, graph entities, or usage data are recorded.',
-        'Inference goes direct to the configured provider only.',
-        '',
-        `To enable platform features later: ${kleur.cyan('./a8-claw configure')} → pick connected.`,
+        `For a private chat: ${kleur.cyan('./a8-claw --incognito')} (per-session, doesn't change install).`,
       ].join('\n'),
       'configured',
     );
@@ -480,13 +443,13 @@ async function cmdStart(): Promise<void> {
   ensureSetup();
   ensureCliAgent(env);
 
-  // --incognito flag overrides the persisted CONNECTION_STATE for this
-  // invocation only (doesn't rewrite .env). Useful for one-off private chats.
-  const flagIncognito = process.argv.includes('--incognito');
-  let connState = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
-  if (flagIncognito) connState = 'incognito';
-  // Propagate so the runtime + auth layer can read it.
-  process.env.CONNECTION_STATE = connState;
+  // --incognito flag is now a per-session hint: it sets the default privacy
+  // for sessions created during THIS invocation only. It does NOT change
+  // CONNECTION_STATE or persist anything — incognito is a session-level
+  // attribute (migration 014), not an install-level one.
+  if (process.argv.includes('--incognito')) {
+    process.env.DEFAULT_SESSION_PRIVACY = 'incognito';
+  }
 
   // Bare `./a8-claw` is the everyday entry point — the user wants a chat
   // REPL, not a tail of daemon logs. Defer to cmdChat which supervises
@@ -524,10 +487,9 @@ async function cmdDaemonForeground(): Promise<void> {
   ensureSetup();
   ensureCliAgent(env);
 
-  const flagIncognito = process.argv.includes('--incognito');
-  let connState = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
-  if (flagIncognito) connState = 'incognito';
-  process.env.CONNECTION_STATE = connState;
+  if (process.argv.includes('--incognito')) {
+    process.env.DEFAULT_SESSION_PRIVACY = 'incognito';
+  }
 
   console.error('');
   console.error(`✓  a8-claw daemon starting (foreground)`);
@@ -550,12 +512,6 @@ async function cmdConnect(): Promise<void> {
   const env = readEnv();
   if (!env.WARP_URL) {
     console.error(`✗  WARP_URL not set; run ./a8-claw configure first.`);
-    process.exit(1);
-  }
-  const currentState = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
-  if (currentState === 'incognito') {
-    console.error(`✗  Currently in INCOGNITO mode — connect is disabled.`);
-    console.error(`   Switch to connected via:  ${kleur.cyan('./a8-claw configure')}  → pick connected.`);
     process.exit(1);
   }
   intro('a8-claw connect');
@@ -705,8 +661,6 @@ async function cmdStatus(): Promise<void> {
     const cs = (env.CONNECTION_STATE as ConnectionState) ?? 'offline';
     if (cs === 'connected') {
       ok(`connected — tenant=${env.TENANT_ID} user=${env.USER_ID}`);
-    } else if (cs === 'incognito') {
-      ok(`${kleur.magenta('INCOGNITO')} — chat-only; no platform calls; nothing recorded`);
     } else {
       warn(
         `OFFLINE — using local placeholder identity (${env.TENANT_ID} / ${env.USER_ID}); run ./a8-claw connect to authenticate`,
@@ -745,8 +699,8 @@ Usage:
   a8-claw                       Open a chat REPL (first-run: onboarding → configure)
   a8-claw chat                  Same — open the REPL
   a8-claw chat MESSAGE          One-shot: send a message and print the reply
-  a8-claw --incognito           Open the REPL in INCOGNITO mode for this run
-  a8-claw configure             Interactive configuration (provider, key, model, privacy)
+  a8-claw --incognito           Default new sessions in this run to INCOGNITO (per-session, not install-wide)
+  a8-claw configure             Interactive configuration (provider, key, model)
   a8-claw --configure           Same, as a flag
   a8-claw connect               Authenticate with the AgentMesh platform
   a8-claw revoke-affirmation    Clear the signed affirmation; next start re-onboards
@@ -758,10 +712,15 @@ Usage:
   a8-claw daemon                Run the host daemon in the foreground (debugging only)
   a8-claw -h | --help           Show this help
 
-Privacy modes (set during configure):
-  connected   memory, audit, metering, dashboard. Starts OFFLINE pending
-              first 'connect' to the platform.
-  incognito   no platform calls ever — chat-only, no persistence, no telemetry.
+Connection states (set during configure / connect):
+  offline     auth pending; chat works, platform features dormant. Default at first run.
+  connected   auth resolved; memory, audit, metering, dashboard live.
+
+Privacy is PER-SESSION (not install-wide). Each session has its own privacy
+flag — 'normal' (default, fleet-visible, resumable) or 'incognito' (no
+platform calls scoped to this session ever leave the runtime). Use the
+--incognito flag at launch to make new sessions in this run default to
+incognito.
 
 First run: walks through four onboarding screens (welcome / when-to-use /
 security / responsibility) and asks you to sign a typed-name affirmation

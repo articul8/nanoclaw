@@ -1,19 +1,36 @@
-import type { PendingApproval, PendingQuestion, Session } from '../types.js';
+import type { PendingApproval, PendingQuestion, Session, SessionPrivacy } from '../types.js';
 import { getDb, hasTable } from './connection.js';
 
 // ── Sessions ──
 
 export function createSession(session: Session): void {
+  // privacy defaults to 'normal' at the DB layer too — callers that pre-date
+  // migration 014 may not set it. Persisting null would violate the NOT NULL
+  // constraint, so coerce here rather than at every call site.
+  const row = { ...session, privacy: session.privacy ?? 'normal' };
   getDb()
     .prepare(
-      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at)
-       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @last_active, @created_at)`,
+      `INSERT INTO sessions (id, agent_group_id, messaging_group_id, thread_id, agent_provider, status, container_status, last_active, created_at, privacy)
+       VALUES (@id, @agent_group_id, @messaging_group_id, @thread_id, @agent_provider, @status, @container_status, @last_active, @created_at, @privacy)`,
     )
-    .run(session);
+    .run(row);
 }
 
 export function getSession(id: string): Session | undefined {
   return getDb().prepare('SELECT * FROM sessions WHERE id = ?').get(id) as Session | undefined;
+}
+
+/**
+ * Fast accessor for the privacy flag — used by `isIncognitoSession()` on
+ * every platform call, so it skips the full row hydration. Returns
+ * `'normal'` when the session does not exist (caller is operating outside
+ * a session context — that's runtime infra, never incognito).
+ */
+export function getSessionPrivacy(id: string): SessionPrivacy {
+  const row = getDb().prepare('SELECT privacy FROM sessions WHERE id = ?').get(id) as
+    | { privacy: SessionPrivacy }
+    | undefined;
+  return row?.privacy ?? 'normal';
 }
 
 export function findSession(messagingGroupId: string, threadId: string | null): Session | undefined {
